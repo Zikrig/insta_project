@@ -8,18 +8,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from handlers.control import ask_power, ask_start
-from services.accounts import accounts_text, remember_all
+from services.accounts import accounts_text
 from handlers.keyboards import admin_kb
-from handlers.profiles import prompt_list, prompt_params, prompt_session
+from handlers.profiles import prompt_delete, prompt_list, prompt_params, prompt_session
 
 router = Router(name="menu")
 _menu_ids: dict[int, int] = {}
 
 WELCOME = (
     "Меню администратора.\n\n"
-    "Загрузить сессию — JSON после входа через scripts/login_session.py.\n"
+    "Загрузить сессию — имя профиля, ник Instagram и JSON после scripts/login_session.py.\n"
     "Загрузить список — Excel с никами.\n"
-    "Параметры — паузы, перерыв и дневной лимит. Ник читается из сессии.\n"
+    "Параметры — паузы, перерыв и дневной лимит.\n"
+    "Удалить профиль — сессия, список и журнал этого профиля.\n"
     "Запустить / Остановить — одна кнопка. Красная «Запустить», пока стоит. Зелёная «Остановить», пока идёт.\n"
     "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n\n"
     "Логин и пароль Instagram бот не спрашивает."
@@ -55,6 +56,11 @@ async def params_button(query: CallbackQuery, state: FSMContext) -> None:
     await _open(query, state, prompt_params)
 
 
+@router.callback_query(F.data == "m:delete")
+async def delete_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _open(query, state, prompt_delete)
+
+
 @router.callback_query(F.data == "m:power")
 async def power_button(query: CallbackQuery, state: FSMContext) -> None:
     message = await _prepare(query, state)
@@ -74,7 +80,6 @@ async def show_menu(message: Message, text: str) -> None:
     Сообщение со снятием нижней клавиатуры Telegram править нельзя,
     поэтому меню и снятие клавиатуры — два разных сообщения.
     """
-    await remember_all()
     body = f"{text}\n\n{await accounts_text()}"
     sent = await message.answer(body, reply_markup=admin_kb())
     await _keep_one_menu(sent)

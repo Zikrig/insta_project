@@ -152,15 +152,17 @@ async def init_db() -> None:
             )
 
 
-async def save_session(name: str, session_path: str) -> Profile:
+async def save_session(name: str, session_path: str, ig_username: str) -> Profile:
     async with _connect() as db:
         await db.execute(
             """
-            INSERT INTO profiles (name, session_path, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET session_path = excluded.session_path
+            INSERT INTO profiles (name, session_path, ig_username, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                session_path = excluded.session_path,
+                ig_username = excluded.ig_username
             """,
-            (name, session_path, _now()),
+            (name, session_path, ig_username, _now()),
         )
         cursor = await db.execute("SELECT * FROM profiles WHERE name = ?", (name,))
         row = await cursor.fetchone()
@@ -190,6 +192,19 @@ async def get_profile(profile_id: int) -> Profile | None:
         cursor = await db.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
         row = await cursor.fetchone()
     return _profile(row) if row else None
+
+
+async def delete_profile(profile_id: int) -> Profile | None:
+    """Удалить профиль вместе с журналом ников и прогонов. Файлы снимает вызывающий код."""
+    async with _connect() as db:
+        cursor = await db.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        await db.execute("DELETE FROM results WHERE profile_id = ?", (profile_id,))
+        await db.execute("DELETE FROM runs WHERE profile_id = ?", (profile_id,))
+        await db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+    return _profile(row)
 
 
 async def list_profiles() -> list[Profile]:

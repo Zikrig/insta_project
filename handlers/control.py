@@ -9,7 +9,6 @@ from aiogram.types import CallbackQuery, Message
 
 from handlers.keyboards import choice_kb
 from services import db
-from services.accounts import remember_username
 from services.db import Profile
 from services.runner import runner
 
@@ -67,7 +66,6 @@ async def on_launch(query: CallbackQuery) -> None:
 
 
 async def launch(message: Message, profile: Profile, *, test: bool) -> None:
-    profile = await remember_username(profile)
     missing = _missing(profile)
     if missing:
         await message.answer(f"У профиля «{profile.name}» не хватает: {', '.join(missing)}.")
@@ -93,7 +91,7 @@ def _missing(profile: Profile) -> list[str]:
     if not profile.list_path or not Path(profile.list_path).is_file() or profile.list_count <= 0:
         missing.append("список")
     if not profile.ig_username:
-        missing.append("ник Instagram (не прочитался из сессии, задайте в «Параметры»)")
+        missing.append("ник Instagram")
     return missing
 
 

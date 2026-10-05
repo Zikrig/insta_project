@@ -295,17 +295,44 @@ async def _remove_one(page: Page, username: str) -> str:
         if await _rate_limited(page):
             raise StopRun("rate_limited")
         return "not_found"
-    row = link.first.locator("xpath=ancestor::*[.//button][1]")
-    button = row.get_by_role("button", name=REMOVE_BUTTON)
-    if await button.count() == 0:
+    button = await _remove_control(link.first)
+    if button is None:
         return "not_found"
-    await button.first.click()
+    await button.click()
     if await _rate_limited(page):
         raise StopRun("rate_limited")
     await _confirm_remove(page)
     if await _rate_limited(page):
         raise StopRun("rate_limited")
     return "removed"
+
+
+async def _remove_control(link):
+    """Кнопка «Удалить» в той же строке, что и ник. Это часто div, не button."""
+    node = link
+    for _ in range(8):
+        parent = node.locator("xpath=..")
+        if await parent.count() == 0:
+            return None
+        control = await _text_control(parent, REMOVE_BUTTON)
+        if control is not None:
+            return control
+        node = parent
+    return None
+
+
+async def _text_control(scope, pattern: re.Pattern[str]):
+    nodes = scope.locator("button, [role='button'], div, span")
+    count = await nodes.count()
+    for index in range(min(count, 40)):
+        item = nodes.nth(index)
+        try:
+            text = (await item.inner_text(timeout=500)).strip()
+        except Exception:
+            continue
+        if pattern.fullmatch(text):
+            return item
+    return None
 
 
 async def _confirm_remove(page: Page) -> None:
@@ -320,10 +347,10 @@ async def _confirm_remove(page: Page) -> None:
             dialog = dialogs.nth(index)
             if await dialog.locator("input").count():
                 continue
-            button = dialog.get_by_role("button", name=REMOVE_BUTTON)
-            if await button.count() == 0:
+            button = await _text_control(dialog, REMOVE_BUTTON)
+            if button is None:
                 continue
-            await button.first.click()
+            await button.click()
             try:
                 await dialog.wait_for(state="hidden", timeout=8000)
             except PlaywrightTimeout:

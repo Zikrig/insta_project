@@ -17,14 +17,13 @@ from services import db
 from services.db import Profile
 from services.excel_io import read_list
 from services.names import LIST_ID, LIST_NICK, normalize_username, safe_profile_name
-from services.accounts import remember_username
 from services.storage import validate_storage_state
 
 logger = logging.getLogger("remover")
 router = Router(name="profiles")
 
 PARAM_FIELDS = (
-    ("ig_username", "Username Instagram"),
+    ("ig_username", "Ник Instagram"),
     ("pause_min", "Пауза от, секунд"),
     ("pause_max", "Пауза до, секунд"),
     ("break_every_min", "Перерыв каждые, от"),
@@ -37,6 +36,7 @@ _FIELD_LABELS = dict(PARAM_FIELDS)
 
 class SessionUpload(StatesGroup):
     name = State()
+    username = State()
     file = State()
 
 
@@ -127,6 +127,17 @@ async def prompt_list(message: Message, state: FSMContext) -> None:
     )
 
 
+async def prompt_delete(message: Message, state: FSMContext) -> None:
+    profiles = await db.list_profiles()
+    if not profiles:
+        await message.answer("Профилей нет.", reply_markup=back_kb())
+        return
+    await message.answer(
+        "Какой профиль удалить? Сессия, список и журнал этого профиля будут стёрты.",
+        reply_markup=choice_kb([(item.name, f"rm:{item.id}") for item in profiles]),
+    )
+
+
 async def prompt_params(message: Message, state: FSMContext) -> None:
     profiles = await db.list_profiles()
     if not profiles:
@@ -149,11 +160,33 @@ async def session_name(message: Message, state: FSMContext) -> None:
         await message.answer(str(exc), reply_markup=back_kb())
         return
     await state.update_data(profile_name=name)
+    await state.set_state(SessionUpload.username)
+    await message.answer(
+        "Ник Instagram этого аккаунта, без @. Например: dressclub_collection",
+        reply_markup=back_kb(),
+    )
+
+
+@router.message(SessionUpload.username, F.text)
+async def session_username(message: Message, state: FSMContext) -> None:
+    username = normalize_username(message.text or "")
+    if username is None:
+        await message.answer(
+            "Ник: латиница, цифры, точка и _, до 30 символов, без @.",
+            reply_markup=back_kb(),
+        )
+        return
+    await state.update_data(ig_username=username)
     await state.set_state(SessionUpload.file)
     await message.answer(
         "Пришлите файл сессии .json (storage_state Playwright).",
         reply_markup=back_kb(),
     )
+
+
+@router.message(SessionUpload.username)
+async def session_username_other(message: Message) -> None:
+    await message.answer("Ник нужно отправить текстом.", reply_markup=back_kb())
 
 
 @router.message(SessionUpload.name)
@@ -175,6 +208,11 @@ async def session_file(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     name = str(data["profile_name"])
+    ig_username = str(data.get("ig_username") or "")
+    if normalize_username(ig_username) is None:
+        await state.set_state(SessionUpload.username)
+        await message.answer("Сначала отправьте ник Instagram текстом.", reply_markup=back_kb())
+        return
     destination = (get_settings().sessions_dir / f"{name}.json").resolve()
     try:
         await _download(message, destination, validate_storage_state)
@@ -186,7 +224,7 @@ async def session_file(message: Message, state: FSMContext) -> None:
         logger.error("сессия не сохранена: %s", type(exc).__name__)
         await message.answer("Не удалось сохранить сессию. Пришлите файл ещё раз.", reply_markup=back_kb())
         return
-    profile = await remember_username(await db.save_session(name, str(destination)))
+    profile = await db.save_session(name, str(destination), ig_username)
     await state.clear()
     from handlers.menu import show_menu
 
@@ -199,6 +237,46 @@ async def session_file(message: Message, state: FSMContext) -> None:
 @router.message(SessionUpload.file)
 async def session_file_other(message: Message) -> None:
     await message.answer("Пришлите сессию документом .json.", reply_markup=back_kb())
+
+
+@router.callback_query(F.data.startswith("rm:"))
+async def ask_delete(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message is None:
+        return
+    profile = await _profile_from_callback(query.data or "")
+    if profile is None:
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
+        return
+    who = f"@{profile.ig_username}" if profile.ig_username else "ник не задан"
+    await query.message.answer(
+        f"Удалить профиль «{profile.name}» ({who})? Это нельзя отменить.",
+        reply_markup=choice_kb([("Удалить", f"rmyes:{profile.id}")]),
+    )
+
+
+@router.callback_query(F.data.startswith("rmyes:"))
+async def confirm_delete(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message is None:
+        return
+    profile = await _profile_from_callback(query.data or "")
+    if profile is None:
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
+        return
+    from services.runner import runner
+
+    if runner.running() and runner.profile_id == profile.id:
+        await query.message.answer("Этот профиль сейчас в прогоне. Сначала остановите его.")
+        return
+    removed = await db.delete_profile(profile.id)
+    if removed is None:
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
+        return
+    _unlink_profile_files(removed)
+    from handlers.menu import show_menu
+
+    await show_menu(query.message, f"Профиль «{removed.name}» удалён.")
 
 
 @router.callback_query(F.data.startswith("list:"))
@@ -375,6 +453,33 @@ async def _recount_list(profile: Profile, kind: str) -> str:
     if not items:
         return f"Режим «{mode}» включён. В первом столбце со второй строки подходящих значений нет."
     return f"Режим «{mode}» включён. Подошло строк: {len(items)}, пропущено: {skipped}."
+
+
+def _unlink_profile_files(profile: Profile) -> None:
+    settings = get_settings()
+    roots = (settings.sessions_dir.resolve(), settings.lists_dir.resolve())
+    for raw in (profile.session_path, profile.list_path):
+        if not raw:
+            continue
+        path = Path(raw).resolve()
+        if not any(_is_inside(path, root) for root in roots):
+            logger.error("файл профиля вне каталога данных, не удалён")
+            continue
+        path.unlink(missing_ok=True)
+        for suffix in (".part", f".upload{path.suffix}"):
+            extra = path.with_name(path.name + suffix) if suffix == ".part" else path.with_name(
+                f"{path.stem}.upload{path.suffix}"
+            )
+            if _is_inside(extra, path.parent):
+                extra.unlink(missing_ok=True)
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 async def _profile_from_callback(data: str) -> Profile | None:
