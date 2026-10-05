@@ -206,6 +206,22 @@ async def _walk(
     return "finished"
 
 
+async def _click(locator, *, timeout: float | None = None) -> None:
+    """Клик со сдвигом на несколько пикселей от центра элемента, внутри его рамки."""
+    kwargs: dict = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    box = await locator.bounding_box()
+    if box is not None and box["width"] >= 4 and box["height"] >= 4:
+        room_x = min(4.0, box["width"] / 2 - 1)
+        room_y = min(4.0, box["height"] / 2 - 1)
+        kwargs["position"] = {
+            "x": box["width"] / 2 + random.uniform(-room_x, room_x),
+            "y": box["height"] / 2 + random.uniform(-room_y, room_y),
+        }
+    await locator.click(**kwargs)
+
+
 async def _pause(seconds: float, stop_event: asyncio.Event) -> bool:
     """Пауза, которую остановка прогона прерывает примерно за секунду."""
     deadline = time.monotonic() + max(0.0, seconds)
@@ -303,7 +319,7 @@ async def _remove_one(page: Page, username: str) -> str:
         logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
         await _shot(page, "no_search")
         raise StopRun("ui_changed")
-    await search.click()
+    await _click(search)
     await search.press("Control+A")
     await search.press("Backspace")
     await search.press_sequentially(username, delay=40)
@@ -332,7 +348,7 @@ async def _remove_one(page: Page, username: str) -> str:
     except Exception:
         label = ""
     _detail("нажимаю %s", (label or "удалить")[:40])
-    await button.click()
+    await _click(button)
     if await _rate_limited(page):
         raise StopRun("rate_limited")
     await _confirm_remove(page, username)
@@ -394,7 +410,7 @@ async def _confirm_remove(page: Page, username: str | None = None) -> None:
             await asyncio.sleep(0.25)
             continue
         _detail("кнопки подтверждения: %s", await _button_labels(dialog))
-        await target.click()
+        await _click(target)
         _detail("подтверждение нажато")
         if await _confirm_settled(page, username):
             return
@@ -548,11 +564,11 @@ async def _click_followers(page: Page, username: str) -> bool:
     logger.info("кликаю подписчиков, href=%s", href or "нет")
     await _dismiss_overlays(page)
     try:
-        await link.first.click(timeout=5_000)
+        await _click(link.first, timeout=5_000)
     except Exception:
         await _dismiss_overlays(page)
         try:
-            await link.first.click(timeout=5_000)
+            await _click(link.first, timeout=5_000)
         except Exception as exc:
             logger.info("клик по подписчикам не прошёл: %s", type(exc).__name__)
             await _shot(page, "click_failed")
@@ -768,6 +784,6 @@ async def _dismiss_overlays(page: Page) -> None:
         if await button.count() == 0:
             continue
         try:
-            await button.first.click(timeout=1500)
+            await _click(button.first, timeout=1500)
         except Exception:
             continue
