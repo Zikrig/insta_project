@@ -6,7 +6,4 @@ services:
     init: true
     shm_size: "1gb"
     volumes:
-      - bot-data:/app/data
-
-volumes:
-  bot-data:
+      - ./data:/app/data

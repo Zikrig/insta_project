@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from handlers.control import ask_power, ask_start
 from services.accounts import accounts_text
 from handlers.keyboards import admin_kb
-from handlers.profiles import prompt_delete, prompt_list, prompt_params, prompt_session
+from handlers.profiles import prompt_list, prompt_params, prompt_profiles, prompt_session
 
 router = Router(name="menu")
 _menu_ids: dict[int, int] = {}
@@ -20,7 +20,7 @@ WELCOME = (
     "Загрузить сессию — имя профиля, ник Instagram и JSON после scripts/login_session.py.\n"
     "Загрузить список — Excel с никами.\n"
     "Параметры — паузы, перерыв и дневной лимит.\n"
-    "Удалить профиль — сессия, список и журнал этого профиля.\n"
+    "Профили — выбрать профиль, затем удалить его или вернуться назад.\n"
     "Запустить / Остановить — одна кнопка. Красная «Запустить», пока стоит. Зелёная «Остановить», пока идёт.\n"
     "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n\n"
     "Логин и пароль Instagram бот не спрашивает."
@@ -56,9 +56,9 @@ async def params_button(query: CallbackQuery, state: FSMContext) -> None:
     await _open(query, state, prompt_params)
 
 
-@router.callback_query(F.data == "m:delete")
-async def delete_button(query: CallbackQuery, state: FSMContext) -> None:
-    await _open(query, state, prompt_delete)
+@router.callback_query(F.data == "m:profiles")
+async def profiles_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _open(query, state, prompt_profiles)
 
 
 @router.callback_query(F.data == "m:power")

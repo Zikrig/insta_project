@@ -7,7 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 BTN_SESSION = "Загрузить сессию"
 BTN_LIST = "Загрузить список"
 BTN_PARAMS = "Параметры"
-BTN_DELETE = "Удалить профиль"
+BTN_PROFILES = "Профили"
 BTN_TEST = "Тест 20"
 
 
@@ -21,7 +21,7 @@ def menu_rows(running: bool | None = None) -> list[list[InlineKeyboardButton]]:
         ],
         [
             InlineKeyboardButton(text=BTN_PARAMS, callback_data="m:params"),
-            InlineKeyboardButton(text=BTN_DELETE, callback_data="m:delete"),
+            InlineKeyboardButton(text=BTN_PROFILES, callback_data="m:profiles"),
         ],
         [InlineKeyboardButton(text=power, callback_data="m:power")],
         [InlineKeyboardButton(text=BTN_TEST, callback_data="m:test")],
@@ -41,6 +41,15 @@ def _running() -> bool:
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="m:back")]]
+    )
+
+
+def profile_actions_kb(profile_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Удалить", callback_data=f"rmyes:{profile_id}")],
+            [InlineKeyboardButton(text="Назад", callback_data="m:profiles")],
+        ]
     )
 
 

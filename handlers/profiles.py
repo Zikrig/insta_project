@@ -12,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from config import get_settings
-from handlers.keyboards import back_kb, choice_kb
+from handlers.keyboards import back_kb, choice_kb, profile_actions_kb
 from services import db
 from services.db import Profile
 from services.excel_io import read_list
@@ -127,13 +127,13 @@ async def prompt_list(message: Message, state: FSMContext) -> None:
     )
 
 
-async def prompt_delete(message: Message, state: FSMContext) -> None:
+async def prompt_profiles(message: Message, state: FSMContext) -> None:
     profiles = await db.list_profiles()
     if not profiles:
         await message.answer("Профилей нет.", reply_markup=back_kb())
         return
     await message.answer(
-        "Какой профиль удалить? Сессия, список и журнал этого профиля будут стёрты.",
+        "Выберите профиль.",
         reply_markup=choice_kb([(item.name, f"rm:{item.id}") for item in profiles]),
     )
 
@@ -248,10 +248,9 @@ async def ask_delete(query: CallbackQuery) -> None:
     if profile is None:
         await query.message.answer("Профиль не найден.", reply_markup=back_kb())
         return
-    who = f"@{profile.ig_username}" if profile.ig_username else "ник не задан"
     await query.message.answer(
-        f"Удалить профиль «{profile.name}» ({who})? Это нельзя отменить.",
-        reply_markup=choice_kb([("Удалить", f"rmyes:{profile.id}")]),
+        f"{format_profile(profile)}\n\nУдаление стирает сессию, список и журнал. Это нельзя отменить.",
+        reply_markup=profile_actions_kb(profile.id),
     )
 
 
