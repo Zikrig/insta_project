@@ -345,10 +345,9 @@ async def _ask_excel(message: Message, state: FSMContext, profile: Profile) -> N
 
 
 async def _show_params(message: Message, profile: Profile) -> None:
-    await message.answer(format_profile(profile), reply_markup=admin_kb())
     kind_label = "В файле: id" if profile.list_kind == LIST_ID else "В файле: ники"
     await message.answer(
-        "Что изменить?",
+        f"{format_profile(profile)}\n\nЧто изменить?",
         reply_markup=choice_kb(
             [(kind_label, f"kind:{profile.id}")]
             + [(label, f"pf:{profile.id}:{field}") for field, label in PARAM_FIELDS]

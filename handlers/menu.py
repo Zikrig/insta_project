@@ -1,23 +1,14 @@
-"""Кнопки меню. Роутер подключается первым, чтобы кнопка прерывала незавершённый ввод."""
+"""Инлайн-меню. Нажатие прерывает незавершённый ввод."""
 
 from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from handlers.control import ask_start, ask_status, ask_stop
-from handlers.keyboards import (
-    BTN_LIST,
-    BTN_PARAMS,
-    BTN_SESSION,
-    BTN_START,
-    BTN_STATUS,
-    BTN_STOP,
-    BTN_TEST,
-    admin_kb,
-)
+from handlers.keyboards import admin_kb
 from handlers.profiles import prompt_list, prompt_params, prompt_session
 
 router = Router(name="menu")
@@ -37,46 +28,77 @@ WELCOME = (
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(WELCOME, reply_markup=admin_kb())
+    await _show(message, WELCOME, clear_reply=True)
 
 
-@router.message(F.text == BTN_SESSION)
-async def session_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await prompt_session(message, state)
+@router.callback_query(F.data == "m:session")
+async def session_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _open(query, state, prompt_session)
 
 
-@router.message(F.text == BTN_LIST)
-async def list_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await prompt_list(message, state)
+@router.callback_query(F.data == "m:list")
+async def list_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _open(query, state, prompt_list)
 
 
-@router.message(F.text == BTN_PARAMS)
-async def params_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await prompt_params(message, state)
+@router.callback_query(F.data == "m:params")
+async def params_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _open(query, state, prompt_params)
 
 
-@router.message(F.text == BTN_START)
-async def start_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await ask_start(message, test=False)
+@router.callback_query(F.data == "m:start")
+async def start_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _run(query, state, test=False)
 
 
-@router.message(F.text == BTN_TEST)
-async def test_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await ask_start(message, test=True)
+@router.callback_query(F.data == "m:test")
+async def test_button(query: CallbackQuery, state: FSMContext) -> None:
+    await _run(query, state, test=True)
 
 
-@router.message(F.text == BTN_STOP)
-async def stop_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
+@router.callback_query(F.data == "m:stop")
+async def stop_button(query: CallbackQuery, state: FSMContext) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
     await ask_stop(message)
 
 
-@router.message(F.text == BTN_STATUS)
-async def status_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
+@router.callback_query(F.data == "m:status")
+async def status_button(query: CallbackQuery, state: FSMContext) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
     await ask_status(message)
+
+
+async def _show(message: Message, text: str, *, clear_reply: bool = False) -> None:
+    if not clear_reply:
+        await message.answer(text, reply_markup=admin_kb())
+        return
+    # Старую клавиатуру под полем ввода снимаем, кнопки остаются у сообщения.
+    sent = await message.answer(text, reply_markup=ReplyKeyboardRemove())
+    await sent.edit_reply_markup(reply_markup=admin_kb())
+
+
+async def _prepare(query: CallbackQuery, state: FSMContext) -> Message | None:
+    await query.answer()
+    await state.clear()
+    message = query.message
+    if not isinstance(message, Message):
+        return None
+    return message
+
+
+async def _open(query: CallbackQuery, state: FSMContext, action) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
+    await action(message, state)
+
+
+async def _run(query: CallbackQuery, state: FSMContext, *, test: bool) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
+    await ask_start(message, test=test)
