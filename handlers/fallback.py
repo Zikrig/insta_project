@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 
-from handlers.keyboards import admin_kb
+from handlers.menu import show_menu
 
 router = Router(name="fallback")
 
@@ -14,5 +14,4 @@ router = Router(name="fallback")
 @router.message()
 async def unknown(message: Message, state: FSMContext) -> None:
     await state.clear()
-    sent = await message.answer("Меню администратора.", reply_markup=ReplyKeyboardRemove())
-    await sent.edit_reply_markup(reply_markup=admin_kb())
+    await show_menu(message, "Меню администратора.")

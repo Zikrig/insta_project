@@ -28,7 +28,7 @@ WELCOME = (
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await _show(message, WELCOME, clear_reply=True)
+    await show_menu(message, WELCOME)
 
 
 @router.callback_query(F.data == "m:session")
@@ -72,13 +72,18 @@ async def status_button(query: CallbackQuery, state: FSMContext) -> None:
     await ask_status(message)
 
 
-async def _show(message: Message, text: str, *, clear_reply: bool = False) -> None:
-    if not clear_reply:
-        await message.answer(text, reply_markup=admin_kb())
+async def show_menu(message: Message, text: str) -> None:
+    """Инлайн-кнопки сразу в новом сообщении.
+
+    Сообщение со снятием нижней клавиатуры Telegram править нельзя,
+    поэтому меню и снятие клавиатуры — два разных сообщения.
+    """
+    await message.answer(text, reply_markup=admin_kb())
+    cleaner = await message.answer("\u2060", reply_markup=ReplyKeyboardRemove())
+    try:
+        await cleaner.delete()
+    except Exception:
         return
-    # Старую клавиатуру под полем ввода снимаем, кнопки остаются у сообщения.
-    sent = await message.answer(text, reply_markup=ReplyKeyboardRemove())
-    await sent.edit_reply_markup(reply_markup=admin_kb())
 
 
 async def _prepare(query: CallbackQuery, state: FSMContext) -> Message | None:
