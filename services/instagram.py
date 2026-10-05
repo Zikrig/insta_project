@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from playwright.async_api import Browser, Page, TimeoutError as PlaywrightTimeout, async_playwright
 
@@ -21,6 +23,9 @@ from services.names import normalize_username
 from services.reasons import safe_detail
 
 logger = logging.getLogger("remover")
+_verbose: contextvars.ContextVar[bool] = contextvars.ContextVar("remover_verbose", default=False)
+_shot_dir: contextvars.ContextVar[Path | None] = contextvars.ContextVar("remover_shots", default=None)
+_shot_n: contextvars.ContextVar[int] = contextvars.ContextVar("remover_shot_n", default=0)
 
 # Селекторы веб-версии instagram.com. Вёрстка сайта их ломает:
 # если прогон останавливается с «не найдена форма подписчиков», править этот блок.
@@ -81,13 +86,16 @@ async def run_remover(
             browser = await playwright.chromium.launch(
                 headless=True,
                 # В Docker у Chromium маленький /dev/shm, без этого флага он часто падает.
-                args=["--disable-dev-shm-usage"],
+                # AutomationControlled: иначе сайт часто отдаёт пустую страницу без списка подписчиков.
+                args=["--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
             )
+            tokens = _arm_trace(config.test_limit is not None)
             try:
                 return await _browse(browser, config, stop_event, on_result, pages)
             finally:
                 pages.clear()
                 await browser.close()
+                _disarm_trace(tokens)
     except StopRun as exc:
         return exc.reason
     except Exception as exc:
@@ -104,18 +112,28 @@ async def _browse(
     on_result: ResultCallback,
     pages: list[Page],
 ) -> str:
+    probe = await browser.new_context()
+    probe_page = await probe.new_page()
+    raw_agent = await probe_page.evaluate("() => navigator.userAgent")
+    await probe.close()
+    user_agent = str(raw_agent).replace("HeadlessChrome", "Chrome")
     context = await browser.new_context(
         storage_state=config.session_path,
         viewport={"width": 1280, "height": 800},
+        locale="ru-RU",
+        user_agent=user_agent,
     )
     page = await context.new_page()
     pages.append(page)
     page.set_default_timeout(20_000)
     page.set_default_navigation_timeout(45_000)
     await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-    await _dismiss_overlays(page)
+    await _settle_profile(page)
+    logger.info("адрес ленты: %s", _page_address(page))
+    await _shot(page, "feed")
     if await _session_rejected(page):
         logger.info("сессия недействительна: вместо ленты страница входа")
+        await _shot(page, "login")
         raise StopRun("session_invalid")
     await _open_followers(page, config.ig_username)
     if not await _pause(config.pause_min, stop_event):
@@ -278,9 +296,12 @@ async def _username_for_id(page: Page, user_id: str) -> str:
 
 
 async def _remove_one(page: Page, username: str) -> str:
+    _detail("--- ник %s ---", username)
     dialog = await _followers_dialog(page)
     search = await _search_box(dialog)
     if search is None:
+        logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
+        await _shot(page, "no_search")
         raise StopRun("ui_changed")
     await search.click()
     await search.press("Control+A")
@@ -297,16 +318,28 @@ async def _remove_one(page: Page, username: str) -> str:
     except PlaywrightTimeout:
         if await _rate_limited(page):
             raise StopRun("rate_limited")
+        _detail("строка @%s не появилась", username)
+        await _shot(page, f"missing_{_shot_name(username)}")
         return "not_found"
     button = await _remove_control(link.first)
     if button is None:
+        _detail("кнопка удаления в строке @%s не найдена", username)
+        await _shot(page, f"no_remove_{_shot_name(username)}")
         return "not_found"
+    label = ""
+    try:
+        label = (await button.inner_text()).replace("\n", " ").strip()
+    except Exception:
+        label = ""
+    _detail("нажимаю %s", (label or "удалить")[:40])
     await button.click()
     if await _rate_limited(page):
         raise StopRun("rate_limited")
     await _confirm_remove(page)
     if await _rate_limited(page):
         raise StopRun("rate_limited")
+    _detail("подписчик @%s снят", username)
+    await _shot(page, f"removed_{_shot_name(username)}")
     return "removed"
 
 
@@ -354,24 +387,33 @@ async def _confirm_remove(page: Page) -> None:
             if button is None:
                 continue
             await button.click()
+            _detail("подтверждение нажато")
             try:
                 await dialog.wait_for(state="hidden", timeout=8000)
             except PlaywrightTimeout:
                 if await _rate_limited(page):
                     raise StopRun("rate_limited")
+                await _shot(page, "confirm_open")
                 raise RuntimeError("подтверждение удаления не закрылось")
             return
         await asyncio.sleep(0.25)
+    _detail("окно подтверждения не появилось")
+    await _shot(page, "no_confirm")
     raise RuntimeError("нет окна подтверждения удаления")
 
 
 async def _open_followers(page: Page, username: str) -> None:
+    logger.info("открываю профиль https://www.instagram.com/%s/", username)
     await page.goto(
         f"https://www.instagram.com/{username}/",
         wait_until="domcontentloaded",
     )
     await _settle_profile(page)
+    logger.info("адрес после профиля: %s, заголовок: %s", _page_address(page), await _title(page))
+    await _shot(page, "profile")
     if await _session_rejected(page):
+        logger.info("вместо профиля страница входа или проверки")
+        await _shot(page, "login")
         raise StopRun("session_invalid")
     opened = await _click_followers(page, username)
     if not opened:
@@ -381,17 +423,31 @@ async def _open_followers(page: Page, username: str) -> None:
             wait_until="domcontentloaded",
         )
         await _settle_profile(page)
+        logger.info("адрес после перехода: %s, заголовок: %s", _page_address(page), await _title(page))
+        await _shot(page, "followers_url")
         if await _session_rejected(page):
+            logger.info("вместо подписчиков страница входа или проверки")
+            await _shot(page, "login")
             raise StopRun("session_invalid")
     dialog = page.get_by_role("dialog").first
     try:
         await dialog.wait_for(state="visible", timeout=15_000)
     except PlaywrightTimeout as exc:
-        logger.info("окно подписчиков не открылось, адрес: %s", _page_address(page))
+        logger.info(
+            "окно подписчиков не открылось, адрес: %s, заголовок: %s",
+            _page_address(page),
+            await _title(page),
+        )
+        await _shot(page, "no_dialog")
         raise StopRun("ui_changed") from exc
+    count = await page.get_by_role("dialog").count()
+    logger.info("окон dialog: %s, адрес: %s", count, _page_address(page))
+    logger.info("поиск в окне: %s", await _describe_inputs(dialog))
+    await _shot(page, "followers")
     # Поиск в шапке сайта не считается: нужен поиск именно в окне подписчиков.
     if await _search_box(dialog) is None:
         logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
+        await _shot(page, "no_search")
         raise StopRun("ui_changed")
 
 
@@ -399,11 +455,22 @@ async def _click_followers(page: Page, username: str) -> bool:
     link = page.locator(f'a[href*="/{username}/followers"]')
     try:
         await link.first.wait_for(state="attached", timeout=12_000)
+        logger.info("ссылок на подписчиков по адресу: %s", await link.count())
     except PlaywrightTimeout:
-        link = page.get_by_role("link", name=FOLLOWERS_LINK)
-        if await link.count() == 0:
-            logger.info("ссылка подписчиков не появилась, адрес: %s", _page_address(page))
+        by_role = page.get_by_role("link", name=FOLLOWERS_LINK)
+        role_count = await by_role.count()
+        logger.info(
+            "ссылок на подписчиков по адресу: 0, по подписи: %s, адрес: %s",
+            role_count,
+            _page_address(page),
+        )
+        logger.info("href со словом followers: %s", await _follower_hrefs(page))
+        if role_count == 0:
+            await _shot(page, "no_followers_link")
             return False
+        link = by_role
+    href = await link.first.get_attribute("href")
+    logger.info("кликаю подписчиков, href=%s", href or "нет")
     await _dismiss_overlays(page)
     try:
         await link.first.click(timeout=5_000)
@@ -411,7 +478,9 @@ async def _click_followers(page: Page, username: str) -> bool:
         await _dismiss_overlays(page)
         try:
             await link.first.click(timeout=5_000)
-        except Exception:
+        except Exception as exc:
+            logger.info("клик по подписчикам не прошёл: %s", type(exc).__name__)
+            await _shot(page, "click_failed")
             return False
     return True
 
@@ -433,6 +502,93 @@ async def _search_box(dialog):
 
 def _page_address(page: Page) -> str:
     return page.url.split("?")[0][:180]
+
+
+def _arm_trace(enabled: bool) -> tuple[contextvars.Token, contextvars.Token, contextvars.Token]:
+    verbose_token = _verbose.set(enabled)
+    folder: Path | None = None
+    if enabled:
+        try:
+            from config import get_settings
+
+            folder = get_settings().logs_dir / "shots"
+            folder.mkdir(parents=True, exist_ok=True)
+            for old in folder.glob("*.png"):
+                old.unlink()
+            logger.info("тест: шаги в этом логе, снимки в data/logs/shots")
+        except Exception as exc:
+            logger.info("снимки теста недоступны: %s", type(exc).__name__)
+            folder = None
+    return verbose_token, _shot_dir.set(folder), _shot_n.set(0)
+
+
+def _disarm_trace(tokens: tuple[contextvars.Token, contextvars.Token, contextvars.Token]) -> None:
+    verbose_token, dir_token, n_token = tokens
+    _verbose.reset(verbose_token)
+    _shot_dir.reset(dir_token)
+    _shot_n.reset(n_token)
+
+
+def _detail(message: str, *args: object) -> None:
+    """Шаги по каждому нику пишем только в тестовом прогоне, чтобы полный лог не раздувался."""
+    if _verbose.get():
+        logger.info(message, *args)
+
+
+def _shot_name(username: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9._-]+", "", username.lower())[:20]
+    return cleaned or "nick"
+
+
+async def _title(page: Page) -> str:
+    try:
+        return (await page.title())[:80]
+    except Exception:
+        return ""
+
+
+async def _shot(page: Page, name: str) -> None:
+    folder = _shot_dir.get()
+    if folder is None:
+        return
+    number = _shot_n.get() + 1
+    _shot_n.set(number)
+    path = folder / f"{number:02d}_{_shot_name(name)}.png"
+    try:
+        await page.screenshot(path=str(path), full_page=False)
+        logger.info("снимок %s", path.name)
+    except Exception as exc:
+        logger.info("снимок не сохранился: %s", type(exc).__name__)
+
+
+async def _describe_inputs(scope) -> str:
+    inputs = scope.locator("input")
+    count = await inputs.count()
+    parts: list[str] = []
+    for index in range(min(count, 5)):
+        field = inputs.nth(index)
+        try:
+            placeholder = await field.get_attribute("placeholder") or ""
+            label = await field.get_attribute("aria-label") or ""
+        except Exception:
+            continue
+        parts.append(f"[{index}] placeholder={placeholder!r} aria={label!r}")
+    return f"всего {count}; " + ("; ".join(parts) or "полей нет")
+
+
+async def _follower_hrefs(page: Page) -> str:
+    try:
+        hrefs = await page.evaluate(
+            """() => [...document.querySelectorAll('a[href]')]
+                .map((el) => el.getAttribute('href') || '')
+                .filter((href) => /follower|подпис/i.test(href))
+                .slice(0, 6)"""
+        )
+    except Exception:
+        return "не прочитаны"
+    if not isinstance(hrefs, list) or not hrefs:
+        return "нет"
+    return ", ".join(str(item)[:80] for item in hrefs[:6])
 
 
 async def _ensure_followers(page: Page, username: str) -> None:
