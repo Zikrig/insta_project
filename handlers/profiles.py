@@ -384,7 +384,8 @@ async def _profile_from_callback(data: str) -> Profile | None:
 
 async def _download(message: Message, destination: Path, validator):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".part")
+    # Суффикс .part отрезает .xlsx, и openpyxl отказывается открывать файл.
+    temporary = destination.with_name(f"{destination.stem}.upload{destination.suffix}")
     try:
         await message.bot.download(message.document, destination=temporary, timeout=120)
         result = await asyncio.to_thread(validator, temporary)
