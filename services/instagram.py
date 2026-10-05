@@ -335,7 +335,7 @@ async def _remove_one(page: Page, username: str) -> str:
     await button.click()
     if await _rate_limited(page):
         raise StopRun("rate_limited")
-    await _confirm_remove(page)
+    await _confirm_remove(page, username)
     if await _rate_limited(page):
         raise StopRun("rate_limited")
     _detail("подписчик @%s снят", username)
@@ -371,35 +371,110 @@ async def _text_control(scope, pattern: re.Pattern[str]):
     return None
 
 
-async def _confirm_remove(page: Page) -> None:
-    """Второе нажатие Remove в окне без поля поиска — это подтверждение."""
-    deadline = time.monotonic() + 5
+async def _confirm_remove(page: Page, username: str | None = None) -> None:
+    """Второе нажатие «Удалить» — кнопка в окне без поля поиска.
+
+    Надпись внутри кнопки клик не принимает: диалог остаётся открытым.
+    Снятие засчитано, когда это окно исчезло и строки ника в списке уже нет.
+    """
+    deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         if await _rate_limited(page):
             raise StopRun("rate_limited")
-        dialogs = page.get_by_role("dialog")
-        count = await dialogs.count()
-        for index in range(count):
-            dialog = dialogs.nth(index)
-            if await dialog.locator("input").count():
-                continue
-            button = await _text_control(dialog, REMOVE_BUTTON)
-            if button is None:
-                continue
-            await button.click()
-            _detail("подтверждение нажато")
-            try:
-                await dialog.wait_for(state="hidden", timeout=8000)
-            except PlaywrightTimeout:
-                if await _rate_limited(page):
-                    raise StopRun("rate_limited")
-                await _shot(page, "confirm_open")
-                raise RuntimeError("подтверждение удаления не закрылось")
+        dialog = await _confirm_dialog(page)
+        if dialog is None:
+            await asyncio.sleep(0.25)
+            continue
+        button = dialog.get_by_role("button", name=REMOVE_BUTTON)
+        if await button.count() == 0:
+            target = await _text_control(dialog, REMOVE_BUTTON)
+        else:
+            target = button.first
+        if target is None:
+            await asyncio.sleep(0.25)
+            continue
+        _detail("кнопки подтверждения: %s", await _button_labels(dialog))
+        await target.click()
+        _detail("подтверждение нажато")
+        if await _confirm_settled(page, username):
             return
-        await asyncio.sleep(0.25)
+        if await _rate_limited(page):
+            raise StopRun("rate_limited")
+        dialog = await _confirm_dialog(page)
+        text = await _short_text(dialog) if dialog is not None else ""
+        _detail("окно подтверждения осталось: %s", " ".join(text.split())[:160])
+        await _shot(page, "confirm_open")
+        raise RuntimeError("подтверждение удаления не закрылось")
     _detail("окно подтверждения не появилось")
     await _shot(page, "no_confirm")
     raise RuntimeError("нет окна подтверждения удаления")
+
+
+async def _confirm_dialog(page: Page):
+    """Окно с кнопкой «Удалить» и без поля поиска. Список подписчиков сюда не входит."""
+    dialogs = page.get_by_role("dialog")
+    count = await dialogs.count()
+    for index in range(count):
+        dialog = dialogs.nth(index)
+        try:
+            if await dialog.locator("input").count():
+                continue
+            named = await dialog.get_by_role("button", name=REMOVE_BUTTON).count()
+            if named == 0 and await _text_control(dialog, REMOVE_BUTTON) is None:
+                continue
+        except Exception:
+            continue
+        return dialog
+    return None
+
+
+async def _confirm_settled(page: Page, username: str | None) -> bool:
+    """Окно с кнопкой «Удалить» должно исчезнуть, а не просто сменить индекс в списке окон."""
+    deadline = time.monotonic() + 6
+    gone = 0
+    while time.monotonic() < deadline:
+        if await _rate_limited(page):
+            raise StopRun("rate_limited")
+        if await _confirm_dialog(page) is None:
+            gone += 1
+            if gone >= 2:
+                return True
+        else:
+            gone = 0
+            if username and not await _row_visible(page, username):
+                return True
+        await asyncio.sleep(0.3)
+    return False
+
+
+async def _row_visible(page: Page, username: str) -> bool:
+    try:
+        dialog = await _followers_dialog(page)
+    except StopRun:
+        return False
+    link = dialog.locator(
+        f'a[href="/{username}/"], a[href^="/{username}/?"], '
+        f'a[href="https://www.instagram.com/{username}/"], '
+        f'a[href^="https://www.instagram.com/{username}/?"]'
+    )
+    try:
+        return await link.first.is_visible()
+    except Exception:
+        return False
+
+
+async def _button_labels(scope, limit: int = 8) -> str:
+    buttons = scope.get_by_role("button")
+    count = await buttons.count()
+    labels: list[str] = []
+    for index in range(min(count, limit)):
+        try:
+            text = (await buttons.nth(index).inner_text(timeout=1000)).replace("\n", " ").strip()
+        except Exception:
+            continue
+        if text:
+            labels.append(text[:40])
+    return ", ".join(labels) or "нет"
 
 
 async def _open_followers(page: Page, username: str) -> None:
