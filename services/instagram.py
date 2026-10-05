@@ -186,7 +186,7 @@ async def _walk(
 
 
 async def _pause(seconds: float, stop_event: asyncio.Event) -> bool:
-    """Пауза, которую «Остановить» прерывает примерно за секунду."""
+    """Пауза, которую остановка прогона прерывает примерно за секунду."""
     deadline = time.monotonic() + max(0.0, seconds)
     while time.monotonic() < deadline:
         if stop_event.is_set():

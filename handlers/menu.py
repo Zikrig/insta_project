@@ -7,20 +7,21 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-from handlers.control import ask_start, ask_status, ask_stop
+from handlers.control import ask_power, ask_start
+from services.accounts import accounts_text, remember_all
 from handlers.keyboards import admin_kb
 from handlers.profiles import prompt_list, prompt_params, prompt_session
 
 router = Router(name="menu")
+_menu_ids: dict[int, int] = {}
 
 WELCOME = (
     "Меню администратора.\n\n"
     "Загрузить сессию — JSON после входа через scripts/login_session.py.\n"
     "Загрузить список — Excel с никами.\n"
-    "Параметры — username, паузы, перерыв и дневной лимит.\n"
-    "Запустить / Остановить — снятие подписчиков.\n"
-    "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n"
-    "Статус — что происходит сейчас.\n\n"
+    "Параметры — паузы, перерыв и дневной лимит. Ник читается из сессии.\n"
+    "Запустить / Остановить — одна кнопка. Красная «Запустить», пока стоит. Зелёная «Остановить», пока идёт.\n"
+    "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n\n"
     "Логин и пароль Instagram бот не спрашивает."
 )
 
@@ -29,6 +30,14 @@ WELCOME = (
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await show_menu(message, WELCOME)
+
+
+@router.callback_query(F.data == "m:back")
+async def back_button(query: CallbackQuery, state: FSMContext) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
+    await show_menu(message, "Меню администратора.")
 
 
 @router.callback_query(F.data == "m:session")
@@ -46,30 +55,17 @@ async def params_button(query: CallbackQuery, state: FSMContext) -> None:
     await _open(query, state, prompt_params)
 
 
-@router.callback_query(F.data == "m:start")
-async def start_button(query: CallbackQuery, state: FSMContext) -> None:
-    await _run(query, state, test=False)
+@router.callback_query(F.data == "m:power")
+async def power_button(query: CallbackQuery, state: FSMContext) -> None:
+    message = await _prepare(query, state)
+    if message is None:
+        return
+    await ask_power(message)
 
 
 @router.callback_query(F.data == "m:test")
 async def test_button(query: CallbackQuery, state: FSMContext) -> None:
     await _run(query, state, test=True)
-
-
-@router.callback_query(F.data == "m:stop")
-async def stop_button(query: CallbackQuery, state: FSMContext) -> None:
-    message = await _prepare(query, state)
-    if message is None:
-        return
-    await ask_stop(message)
-
-
-@router.callback_query(F.data == "m:status")
-async def status_button(query: CallbackQuery, state: FSMContext) -> None:
-    message = await _prepare(query, state)
-    if message is None:
-        return
-    await ask_status(message)
 
 
 async def show_menu(message: Message, text: str) -> None:
@@ -78,10 +74,44 @@ async def show_menu(message: Message, text: str) -> None:
     Сообщение со снятием нижней клавиатуры Telegram править нельзя,
     поэтому меню и снятие клавиатуры — два разных сообщения.
     """
-    await message.answer(text, reply_markup=admin_kb())
+    await remember_all()
+    body = f"{text}\n\n{await accounts_text()}"
+    sent = await message.answer(body, reply_markup=admin_kb())
+    await _keep_one_menu(sent)
     cleaner = await message.answer("\u2060", reply_markup=ReplyKeyboardRemove())
     try:
         await cleaner.delete()
+    except Exception:
+        return
+
+
+async def refresh_open_menu(bot, chat_id: int, *, running: bool | None = None) -> None:
+    """Обновить цвет кнопки запуска на последнем меню, не присылая его заново."""
+    message_id = _menu_ids.get(chat_id)
+    if message_id is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=admin_kb(running=running),
+        )
+    except Exception:
+        return
+
+
+async def _keep_one_menu(sent: Message) -> None:
+    chat_id = sent.chat.id
+    previous = _menu_ids.get(chat_id)
+    _menu_ids[chat_id] = sent.message_id
+    if previous is None or previous == sent.message_id:
+        return
+    try:
+        await sent.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=previous,
+            reply_markup=None,
+        )
     except Exception:
         return
 

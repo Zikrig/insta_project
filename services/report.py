@@ -11,7 +11,6 @@ from email.message import EmailMessage
 from aiogram import Bot
 
 from config import get_settings
-from handlers.keyboards import admin_kb
 from services import db
 from services.reasons import reason_text
 
@@ -75,14 +74,18 @@ def _send_email(text: str) -> None:
         smtp.quit()
 
 
-async def notify_admins(bot: Bot, text: str) -> bool:
+async def notify_admins(bot: Bot, text: str, *, running: bool | None = None) -> bool:
+    from handlers.menu import refresh_open_menu
+
     delivered = False
     for admin_id in get_settings().admin_ids:
         try:
-            await bot.send_message(admin_id, text, reply_markup=admin_kb())
+            await bot.send_message(admin_id, text)
             delivered = True
         except Exception as exc:
             logger.error("сообщение в Telegram не ушло: %s", type(exc).__name__)
+            continue
+        await refresh_open_menu(bot, admin_id, running=running)
     return delivered
 
 

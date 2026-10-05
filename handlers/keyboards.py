@@ -7,35 +7,40 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 BTN_SESSION = "Загрузить сессию"
 BTN_LIST = "Загрузить список"
 BTN_PARAMS = "Параметры"
-BTN_START = "Запустить"
-BTN_STOP = "Остановить"
-BTN_STATUS = "Статус"
 BTN_TEST = "Тест 20"
 
 
-def menu_rows() -> list[list[InlineKeyboardButton]]:
+def menu_rows(running: bool | None = None) -> list[list[InlineKeyboardButton]]:
+    active = _running() if running is None else running
+    power = "🟢 Остановить" if active else "🔴 Запустить"
     return [
         [
             InlineKeyboardButton(text=BTN_SESSION, callback_data="m:session"),
             InlineKeyboardButton(text=BTN_LIST, callback_data="m:list"),
         ],
-        [
-            InlineKeyboardButton(text=BTN_PARAMS, callback_data="m:params"),
-            InlineKeyboardButton(text=BTN_STATUS, callback_data="m:status"),
-        ],
-        [
-            InlineKeyboardButton(text=BTN_START, callback_data="m:start"),
-            InlineKeyboardButton(text=BTN_STOP, callback_data="m:stop"),
-        ],
+        [InlineKeyboardButton(text=BTN_PARAMS, callback_data="m:params")],
+        [InlineKeyboardButton(text=power, callback_data="m:power")],
         [InlineKeyboardButton(text=BTN_TEST, callback_data="m:test")],
     ]
 
 
-def admin_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=menu_rows())
+def admin_kb(running: bool | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=menu_rows(running))
+
+
+def _running() -> bool:
+    from services.runner import runner
+
+    return runner.running()
+
+
+def back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="m:back")]]
+    )
 
 
 def choice_kb(pairs: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=title, callback_data=data)] for title, data in pairs]
-    rows.extend(menu_rows())
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="m:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

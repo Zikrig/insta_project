@@ -1,17 +1,16 @@
-"""Запуск, остановка, статус и тестовый прогон на 20 ников."""
+"""Запуск, остановка и тестовый прогон на 20 ников."""
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from handlers.keyboards import admin_kb, choice_kb
+from handlers.keyboards import choice_kb
 from services import db
+from services.accounts import remember_username
 from services.db import Profile
-from services.reasons import reason_text
 from services.runner import runner
 
 router = Router(name="control")
@@ -21,7 +20,7 @@ TEST_LIMIT = 20
 async def ask_start(message: Message, *, test: bool) -> None:
     profiles = await db.list_profiles()
     if not profiles:
-        await message.answer("Сначала загрузите сессию.", reply_markup=admin_kb())
+        await message.answer("Сначала загрузите сессию.")
         return
     prefix = "test" if test else "run"
     if len(profiles) == 1:
@@ -34,16 +33,24 @@ async def ask_start(message: Message, *, test: bool) -> None:
     )
 
 
+async def ask_power(message: Message) -> None:
+    if runner.running():
+        await ask_stop(message)
+        return
+    await ask_start(message, test=False)
+
+
 async def ask_stop(message: Message) -> None:
     if not runner.running():
-        await message.answer("Прогон не выполняется.", reply_markup=admin_kb())
+        await message.answer("Прогон не выполняется.")
         return
-    await message.answer("Останавливаю прогон.", reply_markup=admin_kb())
+    note = await message.answer("Останавливаю прогон.")
     await runner.stop()
-
-
-async def ask_status(message: Message) -> None:
-    await message.answer(await status_text(), reply_markup=admin_kb())
+    try:
+        await note.edit_text("Прогон остановлен.")
+    except Exception:
+        await message.answer("Прогон остановлен.")
+    await _refresh(message)
 
 
 @router.callback_query(F.data.startswith("run:") | F.data.startswith("test:"))
@@ -54,18 +61,16 @@ async def on_launch(query: CallbackQuery) -> None:
     test = query.data.startswith("test:")
     profile = await _profile(query.data)
     if profile is None:
-        await query.message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await query.message.answer("Профиль не найден.")
         return
     await launch(query.message, profile, test=test)
 
 
 async def launch(message: Message, profile: Profile, *, test: bool) -> None:
+    profile = await remember_username(profile)
     missing = _missing(profile)
     if missing:
-        await message.answer(
-            f"У профиля «{profile.name}» не хватает: {', '.join(missing)}.",
-            reply_markup=admin_kb(),
-        )
+        await message.answer(f"У профиля «{profile.name}» не хватает: {', '.join(missing)}.")
         return
     try:
         await runner.start(
@@ -74,42 +79,11 @@ async def launch(message: Message, profile: Profile, *, test: bool) -> None:
             bot=message.bot,
         )
     except RuntimeError as exc:
-        await message.answer(str(exc), reply_markup=admin_kb())
+        await message.answer(str(exc))
         return
     label = "Тестовый прогон на 20 ников" if test else "Прогон"
-    await message.answer(f"{label} «{profile.name}» запущен.", reply_markup=admin_kb())
-
-
-async def status_text() -> str:
-    lines: list[str] = []
-    if runner.running():
-        removed, not_found, errors = (0, 0, 0)
-        if runner.run_id is not None:
-            removed, not_found, errors = await db.run_counts(runner.run_id)
-        mode = "тест 20" if runner.test_mode else "обычный"
-        name = runner.profile_name or "завершается"
-        lines.append(
-            f"Сейчас идёт прогон «{name}» ({mode}).\n"
-            f"Удалено: {removed}, не найдено: {not_found}, ошибки: {errors}."
-        )
-    else:
-        lines.append("Прогон не выполняется.")
-        last = await db.latest_run()
-        if last is not None and last["stopped_at"]:
-            lines.append(f"Последний: {last['profile_name']}, {reason_text(last['stop_reason'])}.")
-    profiles = await db.list_profiles()
-    if not profiles:
-        lines.append("Профилей нет.")
-    today = date.today()
-    for profile in profiles:
-        done = await db.removed_on_day(profile.id, today)
-        who = f"@{profile.ig_username}" if profile.ig_username else "без username"
-        unit = "id" if profile.list_kind == "id" else "ников"
-        lines.append(
-            f"{profile.name} ({who}): сегодня {done}/{profile.daily_limit}, "
-            f"в списке {profile.list_count} {unit}."
-        )
-    return "\n".join(lines)[:4000]
+    await message.answer(f"{label} «{profile.name}» запущен.")
+    await _refresh(message)
 
 
 def _missing(profile: Profile) -> list[str]:
@@ -119,8 +93,14 @@ def _missing(profile: Profile) -> list[str]:
     if not profile.list_path or not Path(profile.list_path).is_file() or profile.list_count <= 0:
         missing.append("список")
     if not profile.ig_username:
-        missing.append("username Instagram")
+        missing.append("ник Instagram (не прочитался из сессии, задайте в «Параметры»)")
     return missing
+
+
+async def _refresh(message: Message) -> None:
+    from handlers.menu import refresh_open_menu
+
+    await refresh_open_menu(message.bot, message.chat.id)
 
 
 async def _profile(data: str) -> Profile | None:

@@ -141,7 +141,7 @@ class Runner:
             text = render_stop(profile_name, reason, removed, not_found, errors)
             logger.info("%s", text.replace("\n", " | "))
             if self._bot is not None:
-                await notify_admins(self._bot, text)
+                await notify_admins(self._bot, text, running=False)
         except Exception as exc:
             logger.error("не удалось закрыть прогон: %s", type(exc).__name__)
         finally:

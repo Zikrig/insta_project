@@ -12,11 +12,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from config import get_settings
-from handlers.keyboards import admin_kb, choice_kb
+from handlers.keyboards import back_kb, choice_kb
 from services import db
 from services.db import Profile
 from services.excel_io import read_list
 from services.names import LIST_ID, LIST_NICK, normalize_username, safe_profile_name
+from services.accounts import remember_username
 from services.storage import validate_storage_state
 
 logger = logging.getLogger("remover")
@@ -106,14 +107,14 @@ async def prompt_session(message: Message, state: FSMContext) -> None:
     await state.set_state(SessionUpload.name)
     await message.answer(
         "Введите имя профиля: буквы, цифры, _ и -, до 40 символов.",
-        reply_markup=admin_kb(),
+        reply_markup=back_kb(),
     )
 
 
 async def prompt_list(message: Message, state: FSMContext) -> None:
     profiles = await db.list_profiles()
     if not profiles:
-        await message.answer("Сначала загрузите сессию.", reply_markup=admin_kb())
+        await message.answer("Сначала загрузите сессию.", reply_markup=back_kb())
         return
     if len(profiles) == 1:
         await _ask_excel(message, state, profiles[0])
@@ -127,7 +128,7 @@ async def prompt_list(message: Message, state: FSMContext) -> None:
 async def prompt_params(message: Message, state: FSMContext) -> None:
     profiles = await db.list_profiles()
     if not profiles:
-        await message.answer("Сначала загрузите сессию.", reply_markup=admin_kb())
+        await message.answer("Сначала загрузите сессию.", reply_markup=back_kb())
         return
     if len(profiles) == 1:
         await _show_params(message, profiles[0])
@@ -143,19 +144,19 @@ async def session_name(message: Message, state: FSMContext) -> None:
     try:
         name = safe_profile_name(message.text or "")
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=admin_kb())
+        await message.answer(str(exc), reply_markup=back_kb())
         return
     await state.update_data(profile_name=name)
     await state.set_state(SessionUpload.file)
     await message.answer(
         "Пришлите файл сессии .json (storage_state Playwright).",
-        reply_markup=admin_kb(),
+        reply_markup=back_kb(),
     )
 
 
 @router.message(SessionUpload.name)
 async def session_name_other(message: Message) -> None:
-    await message.answer("Имя профиля нужно отправить текстом.", reply_markup=admin_kb())
+    await message.answer("Имя профиля нужно отправить текстом.", reply_markup=back_kb())
 
 
 @router.message(SessionUpload.file, F.document)
@@ -165,10 +166,10 @@ async def session_file(message: Message, state: FSMContext) -> None:
         return
     filename = (document.file_name or "").lower()
     if not filename.endswith(".json"):
-        await message.answer("Нужен файл с расширением .json.", reply_markup=admin_kb())
+        await message.answer("Нужен файл с расширением .json.", reply_markup=back_kb())
         return
     if document.file_size and document.file_size > 1_048_576:
-        await message.answer("Файл сессии больше 1 МБ. Это не storage_state.", reply_markup=admin_kb())
+        await message.answer("Файл сессии больше 1 МБ. Это не storage_state.", reply_markup=back_kb())
         return
     data = await state.get_data()
     name = str(data["profile_name"])
@@ -176,24 +177,26 @@ async def session_file(message: Message, state: FSMContext) -> None:
     try:
         await _download(message, destination, validate_storage_state)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=admin_kb())
+        await message.answer(str(exc), reply_markup=back_kb())
         return
     except Exception as exc:
         # В тексте ошибки Telegram бывает URL с токеном бота — в лог пишем только тип.
         logger.error("сессия не сохранена: %s", type(exc).__name__)
-        await message.answer("Не удалось сохранить сессию. Пришлите файл ещё раз.", reply_markup=admin_kb())
+        await message.answer("Не удалось сохранить сессию. Пришлите файл ещё раз.", reply_markup=back_kb())
         return
-    profile = await db.save_session(name, str(destination))
+    profile = await remember_username(await db.save_session(name, str(destination)))
     await state.clear()
-    await message.answer(
+    from handlers.menu import show_menu
+
+    await show_menu(
+        message,
         f"Сессия профиля «{profile.name}» сохранена.\n{format_profile(profile)}",
-        reply_markup=admin_kb(),
     )
 
 
 @router.message(SessionUpload.file)
 async def session_file_other(message: Message) -> None:
-    await message.answer("Пришлите сессию документом .json.", reply_markup=admin_kb())
+    await message.answer("Пришлите сессию документом .json.", reply_markup=back_kb())
 
 
 @router.callback_query(F.data.startswith("list:"))
@@ -212,16 +215,16 @@ async def list_file(message: Message, state: FSMContext) -> None:
         return
     filename = (document.file_name or "").lower()
     if not filename.endswith(".xlsx"):
-        await message.answer("Нужен файл .xlsx.", reply_markup=admin_kb())
+        await message.answer("Нужен файл .xlsx.", reply_markup=back_kb())
         return
     if document.file_size and document.file_size > 20 * 1024 * 1024:
-        await message.answer("Файл больше 20 МБ, Telegram его не отдаст боту.", reply_markup=admin_kb())
+        await message.answer("Файл больше 20 МБ, Telegram его не отдаст боту.", reply_markup=back_kb())
         return
     data = await state.get_data()
     profile = await db.get_profile(int(data["profile_id"]))
     if profile is None:
         await state.clear()
-        await message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await message.answer("Профиль не найден.", reply_markup=back_kb())
         return
     destination = (get_settings().lists_dir / f"{profile.name}.xlsx").resolve()
     try:
@@ -232,25 +235,27 @@ async def list_file(message: Message, state: FSMContext) -> None:
             lambda path, current=kind: _checked_workbook(path, current),
         )
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=admin_kb())
+        await message.answer(str(exc), reply_markup=back_kb())
         return
     except Exception as exc:
         logger.error("список не сохранён: %s", type(exc).__name__)
-        await message.answer("Не удалось сохранить список. Пришлите файл ещё раз.", reply_markup=admin_kb())
+        await message.answer("Не удалось сохранить список. Пришлите файл ещё раз.", reply_markup=back_kb())
         return
     await db.save_list(profile.id, str(destination), count)
     await state.clear()
     mode = "id" if profile.list_kind == LIST_ID else "ники"
-    await message.answer(
+    from handlers.menu import show_menu
+
+    await show_menu(
+        message,
         f"Список «{profile.name}» сохранён. Записей: {count} (режим: {mode}). "
         f"Пропущено некорректных ячеек: {skipped}.",
-        reply_markup=admin_kb(),
     )
 
 
 @router.message(ListUpload.file)
 async def list_file_other(message: Message) -> None:
-    await message.answer("Пришлите список документом .xlsx.", reply_markup=admin_kb())
+    await message.answer("Пришлите список документом .xlsx.", reply_markup=back_kb())
 
 
 @router.callback_query(F.data.startswith("kind:"))
@@ -260,17 +265,17 @@ async def toggle_kind(query: CallbackQuery) -> None:
         return
     profile = await _profile_from_callback(query.data or "")
     if profile is None:
-        await query.message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
         return
     kind = LIST_NICK if profile.list_kind == LIST_ID else LIST_ID
     await db.update_field(profile.id, "list_kind", kind)
     note = await _recount_list(profile, kind)
     updated = await db.get_profile(profile.id)
     if updated is None:
-        await query.message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
         return
     if note:
-        await query.message.answer(note, reply_markup=admin_kb())
+        await query.message.answer(note)
     await _show_params(query.message, updated)
 
 
@@ -294,13 +299,13 @@ async def edit_field(query: CallbackQuery, state: FSMContext) -> None:
         return
     profile = await db.get_profile(int(parts[1]))
     if profile is None:
-        await query.message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await query.message.answer("Профиль не найден.", reply_markup=back_kb())
         return
     await state.set_state(ParamsEdit.value)
     await state.update_data(profile_id=profile.id, field=field)
     await query.message.answer(
         f"Введите новое значение: {_FIELD_LABELS[field]}.",
-        reply_markup=admin_kb(),
+        reply_markup=back_kb(),
     )
 
 
@@ -311,25 +316,25 @@ async def save_value(message: Message, state: FSMContext) -> None:
     field = str(data.get("field", ""))
     if profile is None or field not in _FIELD_LABELS:
         await state.clear()
-        await message.answer("Настройка устарела. Откройте параметры снова.", reply_markup=admin_kb())
+        await message.answer("Настройка устарела. Откройте параметры снова.", reply_markup=back_kb())
         return
     try:
         value = parse_field(field, message.text or "", profile)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=admin_kb())
+        await message.answer(str(exc), reply_markup=back_kb())
         return
     await db.update_field(profile.id, field, value)
     await state.clear()
     updated = await db.get_profile(profile.id)
     if updated is None:
-        await message.answer("Профиль не найден.", reply_markup=admin_kb())
+        await message.answer("Профиль не найден.", reply_markup=back_kb())
         return
     await _show_params(message, updated)
 
 
 @router.message(ParamsEdit.value)
 async def save_value_other(message: Message) -> None:
-    await message.answer("Значение нужно отправить текстом.", reply_markup=admin_kb())
+    await message.answer("Значение нужно отправить текстом.", reply_markup=back_kb())
 
 
 async def _ask_excel(message: Message, state: FSMContext, profile: Profile) -> None:
@@ -340,7 +345,7 @@ async def _ask_excel(message: Message, state: FSMContext, profile: Profile) -> N
         f"Пришлите .xlsx для профиля «{profile.name}». "
         f"Первый столбец, со второй строки: {values}. "
         "Режим переключается кнопкой в «Параметры».",
-        reply_markup=admin_kb(),
+        reply_markup=back_kb(),
     )
 
 
