@@ -25,8 +25,8 @@ router = Router(name="profiles")
 
 PARAM_FIELDS = (
     ("ig_username", "Username Instagram"),
-    ("pause_min", "Пауза мин, сек"),
-    ("pause_max", "Пауза макс, сек"),
+    ("pause_min", "Пауза от, секунд"),
+    ("pause_max", "Пауза до, секунд"),
     ("break_every_min", "Перерыв каждые, от"),
     ("break_every_max", "Перерыв каждые, до"),
     ("break_minutes", "Длительность перерыва, мин"),
@@ -60,7 +60,7 @@ def format_profile(profile: Profile) -> str:
         f"Список: {listing}\n"
         f"В файле: {mode}\n"
         f"Instagram: {instagram}\n"
-        f"Пауза: {_num(profile.pause_min)}–{_num(profile.pause_max)} сек\n"
+        f"Пауза: {_num(profile.pause_min)}–{_num(profile.pause_max)} секунд\n"
         f"Длинный перерыв: каждые {profile.break_every_min}–{profile.break_every_max} "
         f"удалений, {_num(profile.break_minutes)} мин\n"
         f"Дневной лимит: {profile.daily_limit}"
@@ -74,8 +74,10 @@ def parse_field(field: str, raw: str, profile: Profile) -> str | int | float:
         if username is None:
             raise ValueError("Username: латиница, цифры, точка и _, до 30 символов.")
         return username
-    if field in {"break_every_min", "break_every_max", "daily_limit"}:
+    if field in {"pause_min", "pause_max", "break_every_min", "break_every_max", "daily_limit"}:
         if not text.isdigit():
+            if field in {"pause_min", "pause_max"}:
+                raise ValueError("Нужно одно целое число секунд, например 20.")
             raise ValueError("Нужно целое число.")
         value: int | float = int(text)
     else:
@@ -91,7 +93,7 @@ def parse_field(field: str, raw: str, profile: Profile) -> str | int | float:
     if field in {"pause_min", "pause_max"} and (
         pause_min < 5 or pause_max > 300 or pause_min > pause_max
     ):
-        raise ValueError("Пауза: от 5 до 300 секунд, минимум не больше максимума.")
+        raise ValueError("Пауза: одно число от 5 до 300 секунд. «От» не больше «до».")
     if field in {"break_every_min", "break_every_max"} and (
         every_min < 1 or every_max > 500 or every_min > every_max
     ):
@@ -304,7 +306,7 @@ async def edit_field(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ParamsEdit.value)
     await state.update_data(profile_id=profile.id, field=field)
     await query.message.answer(
-        f"Введите новое значение: {_FIELD_LABELS[field]}.",
+        _field_prompt(field, profile),
         reply_markup=back_kb(),
     )
 
@@ -407,6 +409,20 @@ def _checked_workbook(path: Path, kind: str) -> tuple[int, int]:
         expected = "числовых id" if kind == LIST_ID else "ников"
         raise ValueError(f"В первом столбце со второй строки нет {expected}.")
     return len(entries), skipped
+
+
+def _field_prompt(field: str, profile: Profile) -> str:
+    if field == "pause_min":
+        return (
+            "Минимальная пауза между действиями.\n"
+            f"Одно целое число секунд, от 5 до 300. Сейчас: {_num(profile.pause_min)}."
+        )
+    if field == "pause_max":
+        return (
+            "Максимальная пауза между действиями.\n"
+            f"Одно целое число секунд, от 5 до 300. Сейчас: {_num(profile.pause_max)}."
+        )
+    return f"Введите новое значение: {_FIELD_LABELS[field]}."
 
 
 def _num(value: float) -> str:
