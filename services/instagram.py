@@ -26,9 +26,12 @@ logger = logging.getLogger("remover")
 # если прогон останавливается с «не найдена форма подписчиков», править этот блок.
 SEARCH_INPUT = (
     "input[aria-label='Search input'], "
+    "input[aria-label='Search'], "
+    "input[aria-label='Поиск'], "
     "input[placeholder='Search'], "
     "input[placeholder='Поиск']"
 )
+TEXT_INPUT = "input[type='text'], input[type='search'], input:not([type])"
 REMOVE_BUTTON = re.compile(r"^(Remove|Удалить)\b", re.IGNORECASE)
 BLOCK_TEXT = re.compile(
     r"try again later|action blocked|we limit how often|please wait a few minutes|"
@@ -276,8 +279,8 @@ async def _username_for_id(page: Page, user_id: str) -> str:
 
 async def _remove_one(page: Page, username: str) -> str:
     dialog = await _followers_dialog(page)
-    search = dialog.locator(SEARCH_INPUT).first
-    if await search.count() == 0:
+    search = await _search_box(dialog)
+    if search is None:
         raise StopRun("ui_changed")
     await search.click()
     await search.press("Control+A")
@@ -367,25 +370,69 @@ async def _open_followers(page: Page, username: str) -> None:
         f"https://www.instagram.com/{username}/",
         wait_until="domcontentloaded",
     )
-    await _dismiss_overlays(page)
+    await _settle_profile(page)
     if await _session_rejected(page):
         raise StopRun("session_invalid")
-    link = page.locator(
-        f'a[href="/{username}/followers/"], a[href^="/{username}/followers/?"]'
-    )
-    if await link.count() == 0:
-        link = page.get_by_role("link", name=FOLLOWERS_LINK)
-    if await link.count() == 0:
-        raise StopRun("ui_changed")
-    await link.first.click()
+    opened = await _click_followers(page, username)
+    if not opened:
+        logger.info("открываю подписчиков по адресу, страница: %s", _page_address(page))
+        await page.goto(
+            f"https://www.instagram.com/{username}/followers/",
+            wait_until="domcontentloaded",
+        )
+        await _settle_profile(page)
+        if await _session_rejected(page):
+            raise StopRun("session_invalid")
     dialog = page.get_by_role("dialog").first
     try:
         await dialog.wait_for(state="visible", timeout=15_000)
     except PlaywrightTimeout as exc:
+        logger.info("окно подписчиков не открылось, адрес: %s", _page_address(page))
         raise StopRun("ui_changed") from exc
     # Поиск в шапке сайта не считается: нужен поиск именно в окне подписчиков.
-    if await dialog.locator(SEARCH_INPUT).count() == 0:
+    if await _search_box(dialog) is None:
+        logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
         raise StopRun("ui_changed")
+
+
+async def _click_followers(page: Page, username: str) -> bool:
+    link = page.locator(f'a[href*="/{username}/followers"]')
+    try:
+        await link.first.wait_for(state="attached", timeout=12_000)
+    except PlaywrightTimeout:
+        link = page.get_by_role("link", name=FOLLOWERS_LINK)
+        if await link.count() == 0:
+            logger.info("ссылка подписчиков не появилась, адрес: %s", _page_address(page))
+            return False
+    await _dismiss_overlays(page)
+    try:
+        await link.first.click(timeout=5_000)
+    except Exception:
+        await _dismiss_overlays(page)
+        try:
+            await link.first.click(timeout=5_000)
+        except Exception:
+            return False
+    return True
+
+
+async def _search_box(dialog):
+    specific = dialog.locator(SEARCH_INPUT)
+    try:
+        await specific.first.wait_for(state="attached", timeout=8_000)
+        return specific.first
+    except PlaywrightTimeout:
+        fallback = dialog.locator(TEXT_INPUT)
+        count = await fallback.count()
+        for index in range(min(count, 5)):
+            field = fallback.nth(index)
+            if await field.is_visible():
+                return field
+        return None
+
+
+def _page_address(page: Page) -> str:
+    return page.url.split("?")[0][:180]
 
 
 async def _ensure_followers(page: Page, username: str) -> None:
@@ -398,10 +445,15 @@ async def _ensure_followers(page: Page, username: str) -> None:
 async def _followers_dialog(page: Page):
     dialogs = page.get_by_role("dialog")
     count = await dialogs.count()
+    fallback = None
     for index in range(count):
         dialog = dialogs.nth(index)
         if await dialog.locator(SEARCH_INPUT).count():
             return dialog
+        if fallback is None and await dialog.locator(TEXT_INPUT).count():
+            fallback = dialog
+    if fallback is not None:
+        return fallback
     raise StopRun("ui_changed")
 
 
@@ -409,7 +461,10 @@ async def _session_rejected(page: Page) -> bool:
     url = page.url.lower()
     if any(part in url for part in LOGIN_PARTS):
         return True
-    return await page.locator("form#loginForm").count() > 0
+    if await page.locator("form#loginForm").count() > 0:
+        return True
+    password = page.locator("input[name='password']")
+    return await password.count() > 0 and await password.first.is_visible()
 
 
 async def _rate_limited(page: Page) -> bool:
@@ -455,6 +510,15 @@ async def _short_text(locator) -> str:
         return (await locator.inner_text(timeout=1000))[:400]
     except Exception:
         return ""
+
+
+async def _settle_profile(page: Page) -> None:
+    await _dismiss_overlays(page)
+    try:
+        await page.locator("header, main").first.wait_for(state="visible", timeout=10_000)
+    except PlaywrightTimeout:
+        pass
+    await _dismiss_overlays(page)
 
 
 async def _dismiss_overlays(page: Page) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import smtplib
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
@@ -74,6 +75,18 @@ def _send_email(text: str) -> None:
         smtp.quit()
 
 
+def _api_reason(exc: BaseException) -> str:
+    """Короткий текст ошибки Telegram без URL: в адресе метода бывает токен бота."""
+    raw = getattr(exc, "message", None) or type(exc).__name__
+    text = str(raw)
+    token = get_settings().bot_token
+    if token:
+        text = text.replace(token, "")
+    text = re.sub(r"https?://\S+", "", text)
+    text = " ".join(text.split())
+    return text[:180] or type(exc).__name__
+
+
 async def notify_admins(bot: Bot, text: str, *, running: bool | None = None) -> bool:
     from handlers.menu import refresh_open_menu
 
@@ -83,7 +96,7 @@ async def notify_admins(bot: Bot, text: str, *, running: bool | None = None) -> 
             await bot.send_message(admin_id, text)
             delivered = True
         except Exception as exc:
-            logger.error("сообщение в Telegram не ушло: %s", type(exc).__name__)
+            logger.error("сообщение в Telegram не ушло: %s", _api_reason(exc))
             continue
         await refresh_open_menu(bot, admin_id, running=running)
     return delivered
