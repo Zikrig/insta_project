@@ -108,7 +108,7 @@ def parse_field(field: str, raw: str, profile: Profile) -> str | int | float:
 async def prompt_session(message: Message, state: FSMContext) -> None:
     await state.set_state(SessionUpload.name)
     await message.answer(
-        "Введите имя профиля: буквы, цифры, _ и -, до 40 символов.",
+        "Введите имя профиля: буквы, цифры, точка, _ и -, до 40 символов.",
         reply_markup=back_kb(),
     )
 

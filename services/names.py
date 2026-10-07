@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-PROFILE_RE = re.compile(r"^[\w-]{1,40}$", re.UNICODE)
+PROFILE_RE = re.compile(r"^[\w.-]{1,40}$", re.UNICODE)
 IG_USER_RE = re.compile(r"^[a-z0-9._]{1,30}$")
 IG_ID_RE = re.compile(r"^\d{1,20}$")
 LIST_NICK = "nick"
@@ -15,7 +15,7 @@ def safe_profile_name(raw: str) -> str:
     name = raw.strip()
     if not PROFILE_RE.fullmatch(name) or name in {".", ".."}:
         raise ValueError(
-            "Имя профиля: буквы, цифры, _ и -, от 1 до 40 символов, без пробелов и точек."
+            "Имя профиля: буквы, цифры, точка, _ и -, от 1 до 40 символов, без пробелов."
         )
     return name
 
