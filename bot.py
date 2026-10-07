@@ -48,8 +48,10 @@ async def main() -> None:
     _setup_logging()
     await init_db()
     logger = logging.getLogger("remover")
-    logger.info("бот запущен, админов: %s", len(get_settings().admin_ids))
     bot = Bot(token=get_settings().bot_token)
+    me = await bot.get_me()
+    title = f"@{me.username}" if me.username else me.full_name
+    logger.info("бот запущен: %s, админов: %s", title, len(get_settings().admin_ids))
     dispatcher = Dispatcher(storage=MemoryStorage())
     setup(dispatcher)
     report_task = asyncio.create_task(daily_loop(bot))

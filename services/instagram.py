@@ -224,6 +224,7 @@ async def _click(locator, *, timeout: float | None = None) -> None:
 
 async def _pause(seconds: float, stop_event: asyncio.Event) -> bool:
     """Пауза, которую остановка прогона прерывает примерно за секунду."""
+    _drop_old_shots()
     deadline = time.monotonic() + max(0.0, seconds)
     while time.monotonic() < deadline:
         if stop_event.is_set():
@@ -595,6 +596,29 @@ def _page_address(page: Page) -> str:
     return page.url.split("?")[0][:180]
 
 
+def _drop_old_shots() -> None:
+    """Снимки старше недели. Вызывается в начале каждой паузы."""
+    try:
+        from config import get_settings
+
+        folder = get_settings().logs_dir / "shots"
+    except Exception:
+        return
+    if not folder.is_dir():
+        return
+    cutoff = time.time() - 7 * 24 * 60 * 60
+    removed = 0
+    for path in folder.glob("*.png"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("удалены снимки старше недели: %s", removed)
+
+
 def _arm_trace(enabled: bool) -> tuple[contextvars.Token, contextvars.Token, contextvars.Token]:
     verbose_token = _verbose.set(enabled)
     folder: Path | None = None
@@ -604,8 +628,6 @@ def _arm_trace(enabled: bool) -> tuple[contextvars.Token, contextvars.Token, con
 
             folder = get_settings().logs_dir / "shots"
             folder.mkdir(parents=True, exist_ok=True)
-            for old in folder.glob("*.png"):
-                old.unlink()
             logger.info("тест: шаги в этом логе, снимки в data/logs/shots")
         except Exception as exc:
             logger.info("снимки теста недоступны: %s", type(exc).__name__)
