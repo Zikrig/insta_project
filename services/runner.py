@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+import random
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot
@@ -12,7 +13,7 @@ from aiogram import Bot
 from services import db
 from services.db import Profile
 from services.excel_io import read_list
-from services.instagram import RunConfig, run_remover
+from services.instagram import COOLDOWN_MAX_HOURS, COOLDOWN_MIN_HOURS, RunConfig, run_remover
 from services.reasons import STATUS_RU, safe_detail
 from services.report import notify_admins, render_stop
 
@@ -30,6 +31,7 @@ class Runner:
         self.profile_name: str | None = None
         self.run_id: int | None = None
         self.test_mode = False
+        self._cooldown_note = ""
 
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -38,7 +40,14 @@ class Runner:
         async with self._start_lock:
             if self.running():
                 raise RuntimeError("Уже выполняется другой прогон.")
+            until = await db.cooldown_until(profile.id)
+            if until is not None and until > datetime.now():
+                raise RuntimeError(
+                    "Ограничение Instagram. Следующий запуск не раньше "
+                    f"{until:%d.%m.%Y %H:%M}."
+                )
             self._bot = bot
+            self._cooldown_note = ""
             self._stop = asyncio.Event()
             self._pages = []
             self.profile_id = profile.id
@@ -111,6 +120,7 @@ class Runner:
                 break_minutes=profile.break_minutes,
                 daily_limit=profile.daily_limit,
                 daily_removed=removed_today,
+                profile_id=profile.id,
                 test_limit=test_limit,
                 list_kind=profile.list_kind,
                 usernames=pending,
@@ -131,6 +141,21 @@ class Runner:
             logger.error("прогон прерван: %s", safe_detail(exc))
             reason = "stopped_by_admin" if self._stop.is_set() else "error"
         finally:
+            if reason == "rate_limited":
+                try:
+                    hours = random.randint(COOLDOWN_MIN_HOURS, COOLDOWN_MAX_HOURS)
+                    until = datetime.now() + timedelta(hours=hours)
+                    await db.set_cooldown(profile.id, until)
+                    self._cooldown_note = (
+                        f"Следующий запуск не раньше {until:%d.%m.%Y %H:%M} ({hours} ч)."
+                    )
+                    logger.info(
+                        "остановка на %s ч, до %s",
+                        hours,
+                        until.strftime("%d.%m.%Y %H:%M"),
+                    )
+                except Exception as exc:
+                    logger.error("пауза после ограничения не записана: %s", type(exc).__name__)
             await self._close_run(profile.name, run_id, reason)
 
     async def _close_run(self, profile_name: str, run_id: int | None, reason: str) -> None:
@@ -139,6 +164,8 @@ class Runner:
             if run_id is not None:
                 removed, not_found, errors = await db.finish_run(run_id, reason)
             text = render_stop(profile_name, reason, removed, not_found, errors)
+            if self._cooldown_note:
+                text = f"{text}\n{self._cooldown_note}"
             logger.info("%s", text.replace("\n", " | "))
             if self._bot is not None:
                 await notify_admins(self._bot, text, running=False)
@@ -149,6 +176,7 @@ class Runner:
             self.profile_id = None
             self.profile_name = None
             self.test_mode = False
+            self._cooldown_note = ""
 
 
 runner = Runner()

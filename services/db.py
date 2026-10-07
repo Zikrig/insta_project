@@ -110,11 +110,11 @@ async def init_db() -> None:
                 list_path TEXT,
                 list_count INTEGER NOT NULL DEFAULT 0,
                 ig_username TEXT NOT NULL DEFAULT '',
-                pause_min REAL NOT NULL DEFAULT 15,
-                pause_max REAL NOT NULL DEFAULT 40,
+                pause_min REAL NOT NULL DEFAULT 20,
+                pause_max REAL NOT NULL DEFAULT 60,
                 break_every_min INTEGER NOT NULL DEFAULT 20,
                 break_every_max INTEGER NOT NULL DEFAULT 30,
-                break_minutes REAL NOT NULL DEFAULT 15,
+                break_minutes REAL NOT NULL DEFAULT 60,
                 daily_limit INTEGER NOT NULL DEFAULT 100,
                 list_kind TEXT NOT NULL DEFAULT 'nick',
                 created_at TEXT NOT NULL
@@ -150,14 +150,28 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE profiles ADD COLUMN list_kind TEXT NOT NULL DEFAULT 'nick'"
             )
+        if "cooldown_until" not in columns:
+            await db.execute("ALTER TABLE profiles ADD COLUMN cooldown_until TEXT")
+        await db.execute(
+            """
+            UPDATE profiles
+            SET pause_min = 20, pause_max = 60,
+                break_every_min = 20, break_every_max = 30,
+                break_minutes = 60
+            WHERE pause_min = 15 AND pause_max = 40 AND break_minutes = 15
+            """
+        )
 
 
 async def save_session(name: str, session_path: str, ig_username: str) -> Profile:
     async with _connect() as db:
         await db.execute(
             """
-            INSERT INTO profiles (name, session_path, ig_username, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO profiles (
+                name, session_path, ig_username, created_at,
+                pause_min, pause_max, break_every_min, break_every_max, break_minutes
+            )
+            VALUES (?, ?, ?, ?, 20, 60, 20, 30, 60)
             ON CONFLICT(name) DO UPDATE SET
                 session_path = excluded.session_path,
                 ig_username = excluded.ig_username
@@ -226,6 +240,44 @@ async def final_usernames(profile_id: int) -> set[str]:
         )
         rows = await cursor.fetchall()
     return {row["username"] for row in rows}
+
+
+async def removed_between(profile_id: int, start: str, end: str) -> int:
+    """Успешные снятия с момента start включительно до end, не включая end."""
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*) AS total FROM results
+            WHERE profile_id = ? AND status = 'removed'
+              AND updated_at >= ? AND updated_at < ?
+            """,
+            (profile_id, start, end),
+        )
+        row = await cursor.fetchone()
+    return int(row["total"])
+
+
+async def cooldown_until(profile_id: int) -> datetime | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT cooldown_until FROM profiles WHERE id = ?",
+            (profile_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None or not row["cooldown_until"]:
+        return None
+    try:
+        return datetime.fromisoformat(row["cooldown_until"])
+    except ValueError:
+        return None
+
+
+async def set_cooldown(profile_id: int, until: datetime) -> None:
+    async with _connect() as db:
+        await db.execute(
+            "UPDATE profiles SET cooldown_until = ? WHERE id = ?",
+            (until.replace(microsecond=0).isoformat(), profile_id),
+        )
 
 
 async def removed_on_day(profile_id: int, day: date) -> int:

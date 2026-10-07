@@ -15,6 +15,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from playwright.async_api import Browser, Page, TimeoutError as PlaywrightTimeout, async_playwright
@@ -45,6 +46,11 @@ BLOCK_TEXT = re.compile(
 )
 LOGIN_PARTS = ("/accounts/login", "/challenge/", "checkpoint")
 FOLLOWERS_LINK = re.compile(r"followers|подписчик", re.IGNORECASE)
+HOUR_CAP_MIN = 15
+HOUR_CAP_MAX = 20
+COOLDOWN_MIN_HOURS = 24
+COOLDOWN_MAX_HOURS = 48
+_hour_caps: dict[str, int] = {}
 
 ResultCallback = Callable[[str, str, str], Awaitable[None]]
 
@@ -66,6 +72,7 @@ class RunConfig:
     break_minutes: float
     daily_limit: int
     daily_removed: int
+    profile_id: int
     test_limit: int | None
     list_kind: str
     usernames: list[str]
@@ -160,6 +167,8 @@ async def _walk(
         # Лимит считается по успешным снятиям за календарные сутки, не по попыткам.
         if removed_today >= config.daily_limit:
             return "daily_limit"
+        if not await _wait_hour_slot(config.profile_id, stop_event):
+            return "stopped_by_admin"
         if await _rate_limited(page):
             logger.info("обнаружено ограничение Instagram, прогон остановлен")
             raise StopRun("rate_limited")
@@ -220,6 +229,36 @@ async def _click(locator, *, timeout: float | None = None) -> None:
             "y": box["height"] / 2 + random.uniform(-room_y, room_y),
         }
     await locator.click(**kwargs)
+
+
+async def _wait_hour_slot(profile_id: int, stop_event: asyncio.Event) -> bool:
+    """Не больше 15–20 успешных снятий за календарный час сервера."""
+    from services import db
+
+    while True:
+        now = datetime.now()
+        start = now.replace(minute=0, second=0, microsecond=0)
+        key = start.isoformat()
+        cap = _hour_caps.get(key)
+        if cap is None:
+            cap = random.randint(HOUR_CAP_MIN, HOUR_CAP_MAX)
+            _hour_caps[key] = cap
+            logger.info("лимит этого часа: %s снятий", cap)
+        end = start + timedelta(hours=1)
+        done = await db.removed_between(profile_id, key, end.isoformat())
+        if done < cap:
+            return True
+        wait = (end - datetime.now()).total_seconds()
+        logger.info(
+            "за этот час уже %s из %s, пауза до %s",
+            done,
+            cap,
+            end.strftime("%H:%M"),
+        )
+        if wait <= 0:
+            continue
+        if not await _pause(wait, stop_event):
+            return False
 
 
 async def _pause(seconds: float, stop_event: asyncio.Event) -> bool:

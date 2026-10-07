@@ -63,7 +63,9 @@ def format_profile(profile: Profile) -> str:
         f"Пауза: {_num(profile.pause_min)}–{_num(profile.pause_max)} секунд\n"
         f"Длинный перерыв: каждые {profile.break_every_min}–{profile.break_every_max} "
         f"удалений, {_num(profile.break_minutes)} мин\n"
-        f"Дневной лимит: {profile.daily_limit}"
+        f"В час: не больше 15–20 снятий\n"
+        f"Дневной лимит: {profile.daily_limit}\n"
+        f"После Try Again Later: пауза 24–48 часов"
     )
 
 
