@@ -15,7 +15,7 @@ from services.db import Profile
 from services.excel_io import read_list
 from services.instagram import COOLDOWN_MAX_HOURS, COOLDOWN_MIN_HOURS, RunConfig, run_remover
 from services.reasons import safe_detail
-from services.report import notify_admins, render_stop
+from services.report import notify_admins, queue_counts, queue_line, render_stop
 
 logger = logging.getLogger("remover")
 
@@ -93,6 +93,7 @@ class Runner:
             # Уже снятые и отсутствующие в подписчиках не трогаем. Ошибки остаются в очереди.
             done = await db.final_usernames(profile.id)
             pending = [name for name in usernames if name not in done]
+            removed_total, remaining = queue_counts(usernames, await db.statuses(profile.id))
             logger.info(
                 "профиль %s: режим %s, в файле %s, уже обработано %s, в очереди %s",
                 profile.name,
@@ -124,6 +125,8 @@ class Runner:
                 test_limit=test_limit,
                 list_kind=profile.list_kind,
                 usernames=pending,
+                removed_total=removed_total,
+                remaining=remaining,
             )
 
             async def on_result(username: str, status: str, detail: str = "") -> None:
@@ -161,16 +164,18 @@ class Runner:
                     )
                 except Exception as exc:
                     logger.error("пауза после ограничения не записана: %s", type(exc).__name__)
-            await self._close_run(profile.name, run_id, reason)
+            await self._close_run(profile, run_id, reason)
 
-    async def _close_run(self, profile_name: str, run_id: int | None, reason: str) -> None:
+    async def _close_run(self, profile: Profile, run_id: int | None, reason: str) -> None:
         removed = not_found = errors = 0
         try:
             if run_id is not None:
                 removed, not_found, errors = await db.finish_run(run_id, reason)
-            text = render_stop(profile_name, reason, removed, not_found, errors)
+            text = render_stop(profile.name, reason, removed, not_found, errors)
             if self._cooldown_note:
                 text = f"{text}\n{self._cooldown_note}"
+            removed_total, remaining = await _list_balance(profile)
+            text = f"{text}\n{queue_line(removed_total, remaining)}"
             logger.info("%s", text.replace("\n", " | "))
             if self._bot is not None:
                 await notify_admins(self._bot, text, running=False)
@@ -182,6 +187,20 @@ class Runner:
             self.profile_name = None
             self.test_mode = False
             self._cooldown_note = ""
+
+
+async def _list_balance(profile: Profile) -> tuple[int, int]:
+    """Сколько из текущего файла уже снято и сколько ещё в очереди."""
+    if not profile.list_path or not Path(profile.list_path).is_file():
+        return 0, 0
+    try:
+        names, _skipped = await asyncio.to_thread(
+            read_list, Path(profile.list_path), profile.list_kind
+        )
+    except Exception as exc:
+        logger.error("список для итога не прочитан: %s", type(exc).__name__)
+        return 0, 0
+    return queue_counts(names, await db.statuses(profile.id))
 
 
 runner = Runner()

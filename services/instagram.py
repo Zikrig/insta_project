@@ -22,6 +22,7 @@ from playwright.async_api import Browser, Page, TimeoutError as PlaywrightTimeou
 
 from services.names import normalize_username
 from services.reasons import STATUS_RU, safe_detail
+from services.report import queue_line
 
 logger = logging.getLogger("remover")
 _verbose: contextvars.ContextVar[bool] = contextvars.ContextVar("remover_verbose", default=False)
@@ -77,6 +78,8 @@ class RunConfig:
     test_limit: int | None
     list_kind: str
     usernames: list[str]
+    removed_total: int
+    remaining: int
 
 
 class AbsentAccount(Exception):
@@ -161,6 +164,8 @@ async def _walk(
     on_progress: ProgressCallback | None = None,
 ) -> str:
     removed_today = config.daily_removed
+    removed_total = config.removed_total
+    remaining = config.remaining
     since_break = 0
     # Длинный перерыв не по таймеру, а после пачки успешных удалений.
     break_after = random.randint(config.break_every_min, config.break_every_max)
@@ -180,7 +185,8 @@ async def _walk(
             raise StopRun("rate_limited")
         await _tell(
             on_progress,
-            f"попытка @{username}, за сегодня {removed_today}/{config.daily_limit}",
+            f"попытка @{username}, за сегодня {removed_today}/{config.daily_limit}\n"
+            f"{queue_line(removed_total, remaining)}",
         )
         lookup = username
         try:
@@ -207,11 +213,16 @@ async def _walk(
         processed += 1
         if status == "removed":
             removed_today += 1
+            removed_total += 1
+            remaining = max(0, remaining - 1)
             since_break += 1
+        elif status == "not_found":
+            remaining = max(0, remaining - 1)
         await _tell(
             on_progress,
             f"@{lookup} — {STATUS_RU.get(status, status)}, "
-            f"за сегодня {removed_today}/{config.daily_limit}",
+            f"за сегодня {removed_today}/{config.daily_limit}\n"
+            f"{queue_line(removed_total, remaining)}",
         )
         if status == "removed":
             if removed_today >= config.daily_limit:

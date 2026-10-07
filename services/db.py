@@ -228,6 +228,17 @@ async def list_profiles() -> list[Profile]:
     return [_profile(row) for row in rows]
 
 
+async def statuses(profile_id: int) -> dict[str, str]:
+    """Последний статус каждого ника профиля. Ключ — ник или id из списка."""
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT username, status FROM results WHERE profile_id = ?",
+            (profile_id,),
+        )
+        rows = await cursor.fetchall()
+    return {row["username"]: row["status"] for row in rows}
+
+
 async def final_usernames(profile_id: int) -> set[str]:
     """Ники, которые повторно не трогаем: уже сняты или не были в подписчиках."""
     async with _connect() as db:

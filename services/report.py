@@ -38,6 +38,27 @@ def render_report(day: str, rows: list[tuple[str, int, int, int]], last_stop: st
     return text
 
 
+def queue_counts(names: list[str], statuses: dict[str, str]) -> tuple[int, int]:
+    """Снятые из текущего списка и сколько строк ещё не закрыто.
+
+    «Не найден» в остаток не входит: такой ник повторно не берётся.
+    Ошибка и необработанная строка остаются в очереди.
+    """
+    removed = 0
+    remaining = 0
+    for name in names:
+        status = statuses.get(name)
+        if status == "removed":
+            removed += 1
+        elif status != "not_found":
+            remaining += 1
+    return removed, remaining
+
+
+def queue_line(removed_total: int, remaining: int) -> str:
+    return f"всего удалено {removed_total}, осталось {remaining}"
+
+
 def render_stop(profile_name: str, reason: str, removed: int, not_found: int, errors: int) -> str:
     return (
         f"Прогон «{profile_name}» завершён.\n"
