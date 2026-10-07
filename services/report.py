@@ -87,7 +87,9 @@ def _api_reason(exc: BaseException) -> str:
     return text[:180] or type(exc).__name__
 
 
-async def notify_admins(bot: Bot, text: str, *, running: bool | None = None) -> bool:
+async def notify_admins(
+    bot: Bot, text: str, *, running: bool | None = None, refresh: bool = True
+) -> bool:
     from handlers.menu import refresh_open_menu
 
     delivered = False
@@ -98,7 +100,8 @@ async def notify_admins(bot: Bot, text: str, *, running: bool | None = None) -> 
         except Exception as exc:
             logger.error("сообщение в Telegram не ушло: %s", _api_reason(exc))
             continue
-        await refresh_open_menu(bot, admin_id, running=running)
+        if refresh:
+            await refresh_open_menu(bot, admin_id, running=running)
     return delivered
 
 

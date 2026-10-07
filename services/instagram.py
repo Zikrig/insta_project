@@ -21,7 +21,7 @@ from pathlib import Path
 from playwright.async_api import Browser, Page, TimeoutError as PlaywrightTimeout, async_playwright
 
 from services.names import normalize_username
-from services.reasons import safe_detail
+from services.reasons import STATUS_RU, safe_detail
 
 logger = logging.getLogger("remover")
 _verbose: contextvars.ContextVar[bool] = contextvars.ContextVar("remover_verbose", default=False)
@@ -53,6 +53,7 @@ COOLDOWN_MAX_HOURS = 48
 _hour_caps: dict[str, int] = {}
 
 ResultCallback = Callable[[str, str, str], Awaitable[None]]
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 class StopRun(Exception):
@@ -87,6 +88,7 @@ async def run_remover(
     stop_event: asyncio.Event,
     on_result: ResultCallback,
     pages: list[Page],
+    on_progress: ProgressCallback | None = None,
 ) -> str:
     try:
         async with async_playwright() as playwright:
@@ -98,7 +100,9 @@ async def run_remover(
             )
             tokens = _arm_trace(config.test_limit is not None)
             try:
-                return await _browse(browser, config, stop_event, on_result, pages)
+                return await _browse(
+                    browser, config, stop_event, on_result, pages, on_progress
+                )
             finally:
                 pages.clear()
                 await browser.close()
@@ -118,6 +122,7 @@ async def _browse(
     stop_event: asyncio.Event,
     on_result: ResultCallback,
     pages: list[Page],
+    on_progress: ProgressCallback | None = None,
 ) -> str:
     probe = await browser.new_context()
     probe_page = await probe.new_page()
@@ -145,7 +150,7 @@ async def _browse(
     await _open_followers(page, config.ig_username)
     if not await _pause(config.pause_min, stop_event):
         return "stopped_by_admin"
-    return await _walk(page, config, stop_event, on_result)
+    return await _walk(page, config, stop_event, on_result, on_progress)
 
 
 async def _walk(
@@ -153,6 +158,7 @@ async def _walk(
     config: RunConfig,
     stop_event: asyncio.Event,
     on_result: ResultCallback,
+    on_progress: ProgressCallback | None = None,
 ) -> str:
     removed_today = config.daily_removed
     since_break = 0
@@ -172,9 +178,13 @@ async def _walk(
         if await _rate_limited(page):
             logger.info("обнаружено ограничение Instagram, прогон остановлен")
             raise StopRun("rate_limited")
+        await _tell(
+            on_progress,
+            f"попытка @{username}, за сегодня {removed_today}/{config.daily_limit}",
+        )
+        lookup = username
         try:
             await _ensure_followers(page, config.ig_username)
-            lookup = username
             if config.list_kind == "id":
                 # В поиске подписчиков Instagram ждёт ник, не числовой id.
                 lookup = await _username_for_id(page, username)
@@ -198,6 +208,12 @@ async def _walk(
         if status == "removed":
             removed_today += 1
             since_break += 1
+        await _tell(
+            on_progress,
+            f"@{lookup} — {STATUS_RU.get(status, status)}, "
+            f"за сегодня {removed_today}/{config.daily_limit}",
+        )
+        if status == "removed":
             if removed_today >= config.daily_limit:
                 return "daily_limit"
             if since_break >= break_after:
@@ -259,6 +275,15 @@ async def _wait_hour_slot(profile_id: int, stop_event: asyncio.Event) -> bool:
             continue
         if not await _pause(wait, stop_event):
             return False
+
+
+async def _tell(on_progress: ProgressCallback | None, text: str) -> None:
+    if on_progress is None:
+        return
+    try:
+        await on_progress(text)
+    except Exception as exc:
+        logger.error("сообщение о попытке не ушло: %s", type(exc).__name__)
 
 
 async def _pause(seconds: float, stop_event: asyncio.Event) -> bool:

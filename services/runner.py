@@ -14,7 +14,7 @@ from services import db
 from services.db import Profile
 from services.excel_io import read_list
 from services.instagram import COOLDOWN_MAX_HOURS, COOLDOWN_MIN_HOURS, RunConfig, run_remover
-from services.reasons import STATUS_RU, safe_detail
+from services.reasons import safe_detail
 from services.report import notify_admins, render_stop
 
 logger = logging.getLogger("remover")
@@ -128,9 +128,14 @@ class Runner:
 
             async def on_result(username: str, status: str, detail: str = "") -> None:
                 await db.record_result(profile.id, run_id, username, status, detail)
-                logger.info("%s | %s | %s", profile.name, username, STATUS_RU.get(status, status))
 
-            reason = await run_remover(config, self._stop, on_result, self._pages)
+            async def on_progress(text: str) -> None:
+                if self._bot is not None:
+                    await notify_admins(self._bot, text, refresh=False)
+
+            reason = await run_remover(
+                config, self._stop, on_result, self._pages, on_progress
+            )
         except asyncio.CancelledError:
             # Снимаем флаг отмены, иначе запись причины в базу оборвётся на первом await.
             reason = "stopped_by_admin"
