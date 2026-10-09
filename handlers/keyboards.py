@@ -11,9 +11,11 @@ BTN_PROFILES = "Профили"
 BTN_TEST = "Тест 20"
 
 
-def menu_rows(running: bool | None = None) -> list[list[InlineKeyboardButton]]:
+def menu_rows(running: bool | None = None, *, notify: bool = True) -> list[list[InlineKeyboardButton]]:
     active = _running() if running is None else running
     power = "🟢 Остановить" if active else "🔴 Запустить"
+    # Подпись — действие для этого пользователя, не общее состояние бота.
+    alerts = "Не уведомлять" if notify else "Уведомлять"
     return [
         [
             InlineKeyboardButton(text=BTN_SESSION, callback_data="m:session"),
@@ -25,11 +27,12 @@ def menu_rows(running: bool | None = None) -> list[list[InlineKeyboardButton]]:
         ],
         [InlineKeyboardButton(text=power, callback_data="m:power")],
         [InlineKeyboardButton(text=BTN_TEST, callback_data="m:test")],
+        [InlineKeyboardButton(text=alerts, callback_data="m:notify")],
     ]
 
 
-def admin_kb(running: bool | None = None) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=menu_rows(running))
+def admin_kb(running: bool | None = None, *, notify: bool = True) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=menu_rows(running, notify=notify))
 
 
 def _running() -> bool:

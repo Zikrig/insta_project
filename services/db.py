@@ -130,6 +130,11 @@ async def init_db() -> None:
                 FOREIGN KEY (profile_id) REFERENCES profiles(id)
             );
 
+            CREATE TABLE IF NOT EXISTS user_notify (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 profile_id INTEGER NOT NULL,
@@ -160,6 +165,31 @@ async def init_db() -> None:
                 break_minutes = 60
             WHERE pause_min = 15 AND pause_max = 40 AND break_minutes = 15
             """
+        )
+
+
+async def notifications_on(user_id: int) -> bool:
+    """Писать ли этому Telegram-id сообщения прогона. Нет строки — писать."""
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT enabled FROM user_notify WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return True
+    return bool(row["enabled"])
+
+
+async def set_notifications(user_id: int, enabled: bool) -> None:
+    async with _connect() as db:
+        await db.execute(
+            """
+            INSERT INTO user_notify (user_id, enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET enabled = excluded.enabled
+            """,
+            (user_id, 1 if enabled else 0),
         )
 
 

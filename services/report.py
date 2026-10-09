@@ -115,6 +115,10 @@ async def notify_admins(
 
     delivered = False
     for admin_id in get_settings().admin_ids:
+        if not await db.notifications_on(admin_id):
+            if refresh:
+                await refresh_open_menu(bot, admin_id, running=running)
+            continue
         try:
             await bot.send_message(admin_id, text)
             delivered = True

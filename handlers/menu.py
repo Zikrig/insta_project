@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from handlers.control import ask_power, ask_start
+from services import db
 from services.accounts import accounts_text
 from handlers.keyboards import admin_kb
 from handlers.profiles import prompt_list, prompt_params, prompt_profiles, prompt_session
@@ -22,7 +23,8 @@ WELCOME = (
     "Параметры — паузы, перерыв и дневной лимит.\n"
     "Профили — выбрать профиль, затем удалить его или вернуться назад.\n"
     "Запустить / Остановить — одна кнопка. Красная «Запустить», пока стоит. Зелёная «Остановить», пока идёт.\n"
-    "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n\n"
+    "Тест 20 — тот же прогон, но только 20 ещё не обработанных ников.\n"
+    "Не уведомлять — сообщения прогона не приходят только вам. У остальных администраторов всё как было.\n\n"
     "Логин и пароль Instagram бот не спрашивает."
 )
 
@@ -74,6 +76,26 @@ async def test_button(query: CallbackQuery, state: FSMContext) -> None:
     await _run(query, state, test=True)
 
 
+@router.callback_query(F.data == "m:notify")
+async def notify_button(query: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user = query.from_user
+    message = query.message
+    if user is None or not isinstance(message, Message):
+        await query.answer()
+        return
+    enabled = not await db.notifications_on(user.id)
+    await db.set_notifications(user.id, enabled)
+    if enabled:
+        await query.answer("Уведомления включены")
+    else:
+        await query.answer("Уведомления выключены. Сообщения прогона вам не приходят")
+    try:
+        await message.edit_reply_markup(reply_markup=admin_kb(notify=enabled))
+    except Exception:
+        await show_menu(message, "Меню администратора.")
+
+
 async def show_menu(message: Message, text: str) -> None:
     """Инлайн-кнопки сразу в новом сообщении.
 
@@ -81,7 +103,8 @@ async def show_menu(message: Message, text: str) -> None:
     поэтому меню и снятие клавиатуры — два разных сообщения.
     """
     body = f"{text}\n\n{await accounts_text()}"
-    sent = await message.answer(body, reply_markup=admin_kb())
+    notify = await db.notifications_on(message.chat.id)
+    sent = await message.answer(body, reply_markup=admin_kb(notify=notify))
     await _keep_one_menu(sent)
     cleaner = await message.answer("\u2060", reply_markup=ReplyKeyboardRemove())
     try:
@@ -96,10 +119,11 @@ async def refresh_open_menu(bot, chat_id: int, *, running: bool | None = None) -
     if message_id is None:
         return
     try:
+        notify = await db.notifications_on(chat_id)
         await bot.edit_message_reply_markup(
             chat_id=chat_id,
             message_id=message_id,
-            reply_markup=admin_kb(running=running),
+            reply_markup=admin_kb(running=running, notify=notify),
         )
     except Exception:
         return
