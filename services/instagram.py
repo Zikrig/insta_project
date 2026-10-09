@@ -46,6 +46,16 @@ BLOCK_TEXT = re.compile(
     re.IGNORECASE,
 )
 LOGIN_PARTS = ("/accounts/login", "/challenge/", "checkpoint")
+LOGIN_NAME = re.compile(r"^(log in|войти)$", re.IGNORECASE)
+PAGE_NOTICE = re.compile(
+    r"log in|log into|войти|войдите|session|сеанс|сесси|"
+    r"something went wrong|что-то пошло не так|произошла ошибка|"
+    r"try again|попробуйте|please wait|подождите|"
+    r"action blocked|заблокирован|unusual|подозрительн|"
+    r"confirm it.?s you|help us confirm|подтвердите|"
+    r"suspicious|temporarily|we limit how often|ограничили",
+    re.IGNORECASE,
+)
 FOLLOWERS_LINK = re.compile(r"followers|подписчик", re.IGNORECASE)
 HOUR_CAP_MIN = 15
 HOUR_CAP_MAX = 20
@@ -58,9 +68,10 @@ ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 class StopRun(Exception):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, detail: str = "") -> None:
         super().__init__(reason)
         self.reason = reason
+        self.detail = _clean_note(detail)
 
 
 @dataclass(frozen=True)
@@ -92,7 +103,7 @@ async def run_remover(
     on_result: ResultCallback,
     pages: list[Page],
     on_progress: ProgressCallback | None = None,
-) -> str:
+) -> tuple[str, str]:
     try:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
@@ -103,20 +114,23 @@ async def run_remover(
             )
             tokens = _arm_trace(config.test_limit is not None)
             try:
-                return await _browse(
-                    browser, config, stop_event, on_result, pages, on_progress
+                return (
+                    await _browse(
+                        browser, config, stop_event, on_result, pages, on_progress
+                    ),
+                    "",
                 )
             finally:
                 pages.clear()
                 await browser.close()
                 _disarm_trace(tokens)
     except StopRun as exc:
-        return exc.reason
+        return exc.reason, exc.detail
     except Exception as exc:
         if stop_event.is_set():
-            return "stopped_by_admin"
+            return "stopped_by_admin", ""
         logger.error("сбой браузера: %s", safe_detail(exc))
-        return "error"
+        return "error", safe_detail(exc)
 
 
 async def _browse(
@@ -146,10 +160,10 @@ async def _browse(
     await _settle_profile(page)
     logger.info("адрес ленты: %s", _page_address(page))
     await _shot(page, "feed")
-    if await _session_rejected(page):
+    if await _session_dead(page):
         logger.info("сессия недействительна: вместо ленты страница входа")
         await _shot(page, "login")
-        raise StopRun("session_invalid")
+        await _halt(page, "session_invalid")
     await _open_followers(page, config.ig_username)
     if not await _pause(config.pause_min, stop_event):
         return "stopped_by_admin"
@@ -182,7 +196,7 @@ async def _walk(
             return "stopped_by_admin"
         if await _rate_limited(page):
             logger.info("обнаружено ограничение Instagram, прогон остановлен")
-            raise StopRun("rate_limited")
+            await _halt(page, "rate_limited")
         await _tell(
             on_progress,
             f"попытка @{username}, за сегодня {removed_today}/{config.daily_limit}\n"
@@ -373,9 +387,9 @@ async def _username_for_id(page: Page, user_id: str) -> str:
     )
     status = result.get("status") if isinstance(result, dict) else "error"
     if status == "blocked":
-        raise StopRun("rate_limited")
+        raise StopRun("rate_limited", "сайт просит повторить позже")
     if status == "login":
-        raise StopRun("session_invalid")
+        raise StopRun("session_invalid", "сайт требует войти снова")
     if status == "absent":
         raise AbsentAccount()
     if status != "ok":
@@ -394,7 +408,7 @@ async def _remove_one(page: Page, username: str) -> str:
     if search is None:
         logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
         await _shot(page, "no_search")
-        raise StopRun("ui_changed")
+        await _halt(page, "ui_changed")
     await _click(search)
     await search.press("Control+A")
     await search.press("Backspace")
@@ -409,7 +423,7 @@ async def _remove_one(page: Page, username: str) -> str:
         await link.first.wait_for(state="visible", timeout=8000)
     except PlaywrightTimeout:
         if await _rate_limited(page):
-            raise StopRun("rate_limited")
+            await _halt(page, "rate_limited")
         _detail("строка @%s не появилась", username)
         await _shot(page, f"missing_{_shot_name(username)}")
         return "not_found"
@@ -426,10 +440,10 @@ async def _remove_one(page: Page, username: str) -> str:
     _detail("нажимаю %s", (label or "удалить")[:40])
     await _click(button)
     if await _rate_limited(page):
-        raise StopRun("rate_limited")
+        await _halt(page, "rate_limited")
     await _confirm_remove(page, username)
     if await _rate_limited(page):
-        raise StopRun("rate_limited")
+        await _halt(page, "rate_limited")
     _detail("подписчик @%s снят", username)
     await _shot(page, f"removed_{_shot_name(username)}")
     return "removed"
@@ -472,7 +486,7 @@ async def _confirm_remove(page: Page, username: str | None = None) -> None:
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         if await _rate_limited(page):
-            raise StopRun("rate_limited")
+            await _halt(page, "rate_limited")
         dialog = await _confirm_dialog(page)
         if dialog is None:
             await asyncio.sleep(0.25)
@@ -491,7 +505,7 @@ async def _confirm_remove(page: Page, username: str | None = None) -> None:
         if await _confirm_settled(page, username):
             return
         if await _rate_limited(page):
-            raise StopRun("rate_limited")
+            await _halt(page, "rate_limited")
         dialog = await _confirm_dialog(page)
         text = await _short_text(dialog) if dialog is not None else ""
         _detail("окно подтверждения осталось: %s", " ".join(text.split())[:160])
@@ -526,7 +540,7 @@ async def _confirm_settled(page: Page, username: str | None) -> bool:
     gone = 0
     while time.monotonic() < deadline:
         if await _rate_limited(page):
-            raise StopRun("rate_limited")
+            await _halt(page, "rate_limited")
         if await _confirm_dialog(page) is None:
             gone += 1
             if gone >= 2:
@@ -578,10 +592,10 @@ async def _open_followers(page: Page, username: str) -> None:
     await _settle_profile(page)
     logger.info("адрес после профиля: %s, заголовок: %s", _page_address(page), await _title(page))
     await _shot(page, "profile")
-    if await _session_rejected(page):
+    if await _session_dead(page):
         logger.info("вместо профиля страница входа или проверки")
         await _shot(page, "login")
-        raise StopRun("session_invalid")
+        await _halt(page, "session_invalid")
     opened = await _click_followers(page, username)
     if not opened:
         logger.info("открываю подписчиков по адресу, страница: %s", _page_address(page))
@@ -592,10 +606,10 @@ async def _open_followers(page: Page, username: str) -> None:
         await _settle_profile(page)
         logger.info("адрес после перехода: %s, заголовок: %s", _page_address(page), await _title(page))
         await _shot(page, "followers_url")
-        if await _session_rejected(page):
+        if await _session_dead(page):
             logger.info("вместо подписчиков страница входа или проверки")
             await _shot(page, "login")
-            raise StopRun("session_invalid")
+            await _halt(page, "session_invalid")
     dialog = page.get_by_role("dialog").first
     try:
         await dialog.wait_for(state="visible", timeout=15_000)
@@ -606,7 +620,7 @@ async def _open_followers(page: Page, username: str) -> None:
             await _title(page),
         )
         await _shot(page, "no_dialog")
-        raise StopRun("ui_changed") from exc
+        await _halt(page, "ui_changed")
     count = await page.get_by_role("dialog").count()
     logger.info("окон dialog: %s, адрес: %s", count, _page_address(page))
     logger.info("поиск в окне: %s", await _describe_inputs(dialog))
@@ -615,7 +629,7 @@ async def _open_followers(page: Page, username: str) -> None:
     if await _search_box(dialog) is None:
         logger.info("в окне подписчиков нет поля поиска, адрес: %s", _page_address(page))
         await _shot(page, "no_search")
-        raise StopRun("ui_changed")
+        await _halt(page, "ui_changed")
 
 
 async def _click_followers(page: Page, username: str) -> bool:
@@ -801,6 +815,117 @@ async def _followers_dialog(page: Page):
     raise StopRun("ui_changed")
 
 
+def _clean_note(text: str) -> str:
+    """Короткая фраза со страницы. Cookie и адрес с параметрами сюда не попадают."""
+    cleaned = " ".join(text.replace("\n", " ").split())
+    lowered = cleaned.lower()
+    if "sessionid" in lowered or "cookie" in lowered or "set-cookie" in lowered:
+        return ""
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:200]
+
+
+async def _halt(page: Page, reason: str) -> None:
+    """Остановка с текстом, который сейчас показывает Instagram.
+
+    «Форма не найдена» часто означает, что сессию уже выкинуло:
+    тогда причина — недействительная сессия, а не смена вёрстки.
+    """
+    if reason == "ui_changed":
+        if await _block_message(page):
+            reason = "rate_limited"
+        elif await _session_dead(page):
+            reason = "session_invalid"
+    note = await _ig_notice(page)
+    if reason == "rate_limited" and not note:
+        note = await _block_message(page)
+    if reason == "session_invalid" and not note:
+        if not await _session_cookie(page):
+            note = "сессии в браузере уже нет"
+        elif await _login_control_visible(page) or await _session_rejected(page):
+            note = "на странице предлагают войти"
+    logger.info("остановка %s: %s", reason, note or "текст страницы не прочитан")
+    raise StopRun(reason, note)
+
+
+async def _session_dead(page: Page) -> bool:
+    if await _session_rejected(page):
+        return True
+    if not await _session_cookie(page):
+        return True
+    return await _login_control_visible(page)
+
+
+async def _session_cookie(page: Page) -> bool:
+    """Есть ли cookie сессии. Значение в лог и в сообщение не попадает.
+
+    sessionid у Instagram закрыт от страницы, поэтому смотрим банк браузера, не document.cookie.
+    """
+    try:
+        cookies = await page.context.cookies("https://www.instagram.com")
+    except Exception:
+        return True
+    return any(item.get("name") == "sessionid" and item.get("value") for item in cookies)
+
+
+async def _login_control_visible(page: Page) -> bool:
+    for role in ("button", "link"):
+        nodes = page.get_by_role(role, name=LOGIN_NAME)
+        try:
+            count = await nodes.count()
+        except Exception:
+            continue
+        for index in range(min(count, 3)):
+            try:
+                if await nodes.nth(index).is_visible():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+async def _ig_notice(page: Page) -> str:
+    """Короткие фразы ошибки со страницы, без списка подписчиков."""
+    chunks: list[str] = [await _title(page)]
+    alerts = page.locator("[role='alert']")
+    try:
+        alert_count = await alerts.count()
+    except Exception:
+        alert_count = 0
+    for index in range(min(alert_count, 6)):
+        chunks.append(await _short_text(alerts.nth(index)))
+    headings = page.get_by_role("heading")
+    try:
+        heading_count = await headings.count()
+    except Exception:
+        heading_count = 0
+    for index in range(min(heading_count, 4)):
+        chunks.append(await _short_text(headings.nth(index)))
+    dialogs = page.get_by_role("dialog")
+    try:
+        dialog_count = await dialogs.count()
+    except Exception:
+        dialog_count = 0
+    for index in range(dialog_count):
+        dialog = dialogs.nth(index)
+        try:
+            if await dialog.locator("input").count():
+                continue
+        except Exception:
+            continue
+        chunks.append(await _short_text(dialog))
+    picked: list[str] = []
+    for raw in chunks:
+        text = _clean_note(raw)
+        if not text or text.lower() in {"instagram"}:
+            continue
+        if PAGE_NOTICE.search(text) or BLOCK_TEXT.search(text):
+            if text not in picked:
+                picked.append(text)
+    return _clean_note(" | ".join(picked[:2]))
+
+
 async def _session_rejected(page: Page) -> bool:
     url = page.url.lower()
     if any(part in url for part in LOGIN_PARTS):
@@ -812,7 +937,11 @@ async def _session_rejected(page: Page) -> bool:
 
 
 async def _rate_limited(page: Page) -> bool:
-    """Ищем текст ограничения в коротких окнах, а не в списке подписчиков.
+    return bool(await _block_message(page))
+
+
+async def _block_message(page: Page) -> str:
+    """Текст ограничения в коротких окнах, не в списке подписчиков.
 
     В списке встречаются биографии, и фраза оттуда не должна останавливать прогон.
     """
@@ -821,7 +950,7 @@ async def _rate_limited(page: Page) -> bool:
     except Exception:
         title = ""
     if BLOCK_TEXT.search(title):
-        return True
+        return _clean_note(title)
     alerts = page.locator("[role='alert']")
     try:
         alert_count = await alerts.count()
@@ -830,12 +959,12 @@ async def _rate_limited(page: Page) -> bool:
     for index in range(min(alert_count, 10)):
         text = await _short_text(alerts.nth(index))
         if BLOCK_TEXT.search(text):
-            return True
+            return _clean_note(text)
     dialogs = page.get_by_role("dialog")
     try:
         dialog_count = await dialogs.count()
     except Exception:
-        return False
+        return ""
     for index in range(dialog_count):
         dialog = dialogs.nth(index)
         try:
@@ -845,8 +974,8 @@ async def _rate_limited(page: Page) -> bool:
         except Exception:
             continue
         if BLOCK_TEXT.search(text):
-            return True
-    return False
+            return _clean_note(text)
+    return ""
 
 
 async def _short_text(locator) -> str:

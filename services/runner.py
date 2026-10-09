@@ -81,6 +81,7 @@ class Runner:
 
     async def _execute(self, profile: Profile, test_limit: int | None) -> None:
         reason = "error"
+        ig_note = ""
         run_id: int | None = None
         try:
             if not profile.list_path or not Path(profile.list_path).is_file():
@@ -136,7 +137,7 @@ class Runner:
                 if self._bot is not None:
                     await notify_admins(self._bot, text, refresh=False)
 
-            reason = await run_remover(
+            reason, ig_note = await run_remover(
                 config, self._stop, on_result, self._pages, on_progress
             )
         except asyncio.CancelledError:
@@ -164,21 +165,28 @@ class Runner:
                     )
                 except Exception as exc:
                     logger.error("пауза после ограничения не записана: %s", type(exc).__name__)
-            await self._close_run(profile, run_id, reason)
+            await self._close_run(profile, run_id, reason, ig_note)
 
-    async def _close_run(self, profile: Profile, run_id: int | None, reason: str) -> None:
+    async def _close_run(
+        self, profile: Profile, run_id: int | None, reason: str, ig_note: str = ""
+    ) -> None:
         removed = not_found = errors = 0
         try:
             if run_id is not None:
                 removed, not_found, errors = await db.finish_run(run_id, reason)
-            text = render_stop(profile.name, reason, removed, not_found, errors)
+            text = render_stop(profile.name, reason, removed, not_found, errors, ig_note)
             if self._cooldown_note:
                 text = f"{text}\n{self._cooldown_note}"
             removed_total, remaining = await _list_balance(profile)
             text = f"{text}\n{queue_line(removed_total, remaining)}"
             logger.info("%s", text.replace("\n", " | "))
             if self._bot is not None:
-                await notify_admins(self._bot, text, running=False)
+                await notify_admins(
+                    self._bot,
+                    text,
+                    running=False,
+                    urgent=reason in {"session_invalid", "rate_limited", "ui_changed", "error"},
+                )
         except Exception as exc:
             logger.error("не удалось закрыть прогон: %s", type(exc).__name__)
         finally:

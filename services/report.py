@@ -59,14 +59,28 @@ def queue_line(removed_total: int, remaining: int) -> str:
     return f"всего удалено {removed_total}, осталось {remaining}"
 
 
-def render_stop(profile_name: str, reason: str, removed: int, not_found: int, errors: int) -> str:
-    return (
-        f"Прогон «{profile_name}» завершён.\n"
-        f"Причина: {reason_text(reason)}\n"
-        f"Удалено: {removed}\n"
-        f"Не найдено: {not_found}\n"
-        f"Ошибки: {errors}"
+def render_stop(
+    profile_name: str,
+    reason: str,
+    removed: int,
+    not_found: int,
+    errors: int,
+    ig_note: str = "",
+) -> str:
+    lines = [
+        f"Прогон «{profile_name}» завершён.",
+        f"Причина: {reason_text(reason)}",
+    ]
+    if ig_note:
+        lines.append(f"Instagram: {ig_note}")
+    lines.extend(
+        [
+            f"Удалено: {removed}",
+            f"Не найдено: {not_found}",
+            f"Ошибки: {errors}",
+        ]
     )
+    return "\n".join(lines)
 
 
 async def build_report(day: date) -> str:
@@ -109,13 +123,19 @@ def _api_reason(exc: BaseException) -> str:
 
 
 async def notify_admins(
-    bot: Bot, text: str, *, running: bool | None = None, refresh: bool = True
+    bot: Bot,
+    text: str,
+    *,
+    running: bool | None = None,
+    refresh: bool = True,
+    urgent: bool = False,
 ) -> bool:
     from handlers.menu import refresh_open_menu
 
     delivered = False
     for admin_id in get_settings().admin_ids:
-        if not await db.notifications_on(admin_id):
+        # Сбой сессии и ограничение сайта приходят даже тем, кто выключил обычные сообщения.
+        if not urgent and not await db.notifications_on(admin_id):
             if refresh:
                 await refresh_open_menu(bot, admin_id, running=running)
             continue
